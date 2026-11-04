@@ -14,7 +14,7 @@ sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent))
 import model_fingerprint as mf  # noqa: E402
 import publish  # noqa: E402
 import run_matrix as rm  # noqa: E402
-from test_model_fingerprint import LANES, baseline, content_shape, fill, lane  # noqa: E402
+from test_model_fingerprint import LANES, baseline, content_shape, fill, lane, no_logprobs  # noqa: E402
 
 mf.RETRY_BACKOFF_S = 0.0
 
@@ -207,6 +207,8 @@ class ReportShapeTest(unittest.TestCase):
                 role = roles[(url, body["model"])]
                 if role == "control":
                     return content_shape(["q", "r"], k=k, prompt_tokens=sig * 3)
+                if "logprobs" not in body:  # a text lane never asks
+                    return no_logprobs(prompt_tokens=sig, content="ab")
                 return answer(url, body, k, sig, 0.01 if role == "subject" else 0.0)
             return post
 
@@ -223,16 +225,28 @@ class ReportShapeTest(unittest.TestCase):
             return content_shape(["a", "b"], k=k, prompt_tokens=sig + (3 if "fireworks" in url else 0),
                                  spread=spread, chosen=chosen)
         env = {k: "k" for k in ("DEEPRELAY_API_KEY", "TOGETHER_API_KEY", "FIREWORKS_API_KEY",
-                                "DASHSCOPE_API_KEY")}
+                                "DASHSCOPE_API_KEY", "DEEPSEEK_API_KEY", "ZAI_API_KEY")}
         with tempfile.TemporaryDirectory() as d:
             out = pathlib.Path(d) / "report.json"
             code = rm.main(["--json-out", str(out), "--quiet"], env=env,
                            run_model=lambda config, lanes, env, log: mf.run(config, lanes=lanes, env=env,
                                                                             post=post_for(lanes)))
             rep = json.loads(out.read_text())
-        self.assertEqual(len(rep["models"]), 4)
+        self.assertEqual(len(rep["models"]), 5)
         for m in rep["models"]:
-            self.assertEqual(m["fingerprint"]["verdict"], "pass", (m["id"], m["fingerprint"]["reasons"]))
+            fp = m["fingerprint"]
+            if m["id"] == "deeprelay/glm-5.2":
+                # One logprob reference plus the vendor's text lane: reported,
+                # never judged, and the text lane is not a wire "reference".
+                self.assertEqual(fp["verdict"], "insufficient", fp["reasons"])
+                self.assertEqual([l["role"] for l in m["lanes"]], ["subject", "reference", "text_reference"])
+                self.assertEqual(fp["text_references"][0]["lane"], "zai")
+                continue
+            self.assertEqual(fp["verdict"], "pass", (m["id"], fp["reasons"]))
+            text = [l for l in m["lanes"] if l["role"] == "text_reference"]
+            if m["id"].startswith("deeprelay/glm-5.3"):
+                self.assertEqual([l["name"] for l in text], ["zai"])
+                self.assertEqual(fp["text_references"][0]["vs"]["deeprelay"]["same_content"], 12)
         self.assertEqual(code, rm.EXIT_OK)
         self.assertNotIn("sk-", json.dumps(rep))
 

@@ -46,6 +46,8 @@
       "lanes": [
         {"name": "deeprelay", "role": "subject", "base_url": "https://api.deeprelay.ai/v1",
          "model": "deeprelay/deepseek-v4.1-flash", "key_env": "DEEPRELAY_API_KEY", "top_logprobs": 5},
+        {"name": "deepseek", "role": "reference", "base_url": "https://api.deepseek.com/v1",
+         "model": "deepseek-flash", "key_env": "DEEPSEEK_API_KEY", "top_logprobs": 5},
         {"name": "together", "role": "reference", "base_url": "https://api.together.xyz/v1",
          "model": "deepseek-ai/DeepSeek-V4.1-Flash-1017", "key_env": "TOGETHER_API_KEY", "top_logprobs": 5},
         {"name": "fireworks", "role": "reference", "base_url": "https://api.fireworks.ai/inference/v1",
@@ -53,6 +55,31 @@
         {"name": "ctrl_v41flash_pre1017", "role": "control", "base_url": "https://api.together.xyz/v1",
          "model": "deepseek-ai/DeepSeek-V4.1-Flash", "key_env": "TOGETHER_API_KEY", "top_logprobs": 5,
          "advisory": true},
+        {"name": "ctrl_minimax_m3", "role": "control", "base_url": "https://api.fireworks.ai/inference/v1",
+         "model": "accounts/fireworks/models/minimax-m3", "key_env": "FIREWORKS_API_KEY", "top_logprobs": 5}
+      ]
+    },
+    {
+      "id": "deeprelay/glm-5.2",
+      "display_name": "GLM 5.2",
+      "weights": "zai-org/GLM-5.2",
+      "request_extra": {"reasoning_effort": "none"},
+      "max_tokens": 300,
+      "_comment": [
+        "Together is the only independent deployment that returns logprobs for GLM 5.2 (Fireworks does",
+        "not carry it), so the model reads INSUFFICIENT: a verdict needs two logprob references. The",
+        "vendor's own API (Z.ai) accepts temperature 0 and reasoning_effort none but returns no logprobs,",
+        "so it is a text lane: its greedy answers and prompt_tokens shape are compared with every lane",
+        "and reported, without judging. Control: MiniMax M3 (different family; lp_delta 0.11 vs limit",
+        "0.046). gpt-oss-120b is not separable at k=1 (lp_delta 0.004, relative signature 11/12)."
+      ],
+      "lanes": [
+        {"name": "deeprelay", "role": "subject", "base_url": "https://api.deeprelay.ai/v1",
+         "model": "deeprelay/glm-5.2", "key_env": "DEEPRELAY_API_KEY", "top_logprobs": 5},
+        {"name": "together", "role": "reference", "base_url": "https://api.together.xyz/v1",
+         "model": "zai-org/GLM-5.2", "key_env": "TOGETHER_API_KEY", "top_logprobs": 5},
+        {"name": "zai", "role": "reference", "evidence": "text", "base_url": "https://api.z.ai/api/paas/v4",
+         "model": "glm-5.2", "key_env": "ZAI_API_KEY"},
         {"name": "ctrl_minimax_m3", "role": "control", "base_url": "https://api.fireworks.ai/inference/v1",
          "model": "accounts/fireworks/models/minimax-m3", "key_env": "FIREWORKS_API_KEY", "top_logprobs": 5}
       ]
@@ -68,7 +95,8 @@
         "the budget before any content is emitted. Controls: GLM 5.3 Flash on Fireworks (sibling, thinking on,",
         "content-sliced) and MiniMax M3 on Fireworks (different family, thinking on, content-sliced).",
         "Measured 2026-11-03: the sibling is NOT separable (JS 0.030 vs limit 0.076), so this model reads",
-        "inconclusive until the method can tell GLM 5.3 from GLM 5.3 Flash; see METHOD.md."
+        "inconclusive until the method can tell GLM 5.3 from GLM 5.3 Flash; see METHOD.md.",
+        "Z.ai (the vendor) returns no logprobs; its lane is text-only and informs without judging."
       ],
       "lanes": [
         {"name": "deeprelay", "role": "subject", "base_url": "https://api.deeprelay.ai/v1",
@@ -77,6 +105,8 @@
          "model": "zai-org/GLM-5.3", "key_env": "TOGETHER_API_KEY", "top_logprobs": 5},
         {"name": "fireworks", "role": "reference", "base_url": "https://api.fireworks.ai/inference/v1",
          "model": "accounts/fireworks/models/glm-5p3", "key_env": "FIREWORKS_API_KEY", "top_logprobs": 5},
+        {"name": "zai", "role": "reference", "evidence": "text", "base_url": "https://api.z.ai/api/paas/v4",
+         "model": "glm-5.3", "key_env": "ZAI_API_KEY"},
         {"name": "ctrl_glm53flash", "role": "control", "base_url": "https://api.fireworks.ai/inference/v1",
          "model": "accounts/fireworks/models/glm-5p3-flash", "key_env": "FIREWORKS_API_KEY", "top_logprobs": 5},
         {"name": "ctrl_minimax_m3", "role": "control", "base_url": "https://api.fireworks.ai/inference/v1",
@@ -91,7 +121,8 @@
       "_comment": [
         "Thinking-only, same treatment as GLM 5.3. Controls: GLM 5.3 on Fireworks (sibling) and MiniMax M3",
         "on Fireworks (different family, thinking on, content-sliced). Measured 2026-11-03: the sibling is",
-        "NOT separable at k=1 (lp_delta 0.016 vs limit 0.077); inconclusive until it is."
+        "NOT separable at k=1 (lp_delta 0.016 vs limit 0.077); inconclusive until it is.",
+        "Z.ai (the vendor) returns no logprobs; its lane is text-only and informs without judging."
       ],
       "lanes": [
         {"name": "deeprelay", "role": "subject", "base_url": "https://api.deeprelay.ai/v1",
@@ -100,6 +131,8 @@
          "model": "zai-org/GLM-5.3-Flash", "key_env": "TOGETHER_API_KEY", "top_logprobs": 5},
         {"name": "fireworks", "role": "reference", "base_url": "https://api.fireworks.ai/inference/v1",
          "model": "accounts/fireworks/models/glm-5p3-flash", "key_env": "FIREWORKS_API_KEY", "top_logprobs": 5},
+        {"name": "zai", "role": "reference", "evidence": "text", "base_url": "https://api.z.ai/api/paas/v4",
+         "model": "glm-5.3-flash", "key_env": "ZAI_API_KEY"},
         {"name": "ctrl_glm53", "role": "control", "base_url": "https://api.fireworks.ai/inference/v1",
          "model": "accounts/fireworks/models/glm-5p3", "key_env": "FIREWORKS_API_KEY", "top_logprobs": 5},
         {"name": "ctrl_minimax_m3", "role": "control", "base_url": "https://api.fireworks.ai/inference/v1",

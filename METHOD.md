@@ -139,6 +139,33 @@ Within each lane, replicate 0 vs replicate 1 of the same prompt, over
 aligned prompts, at the lane's width. A lane's distance to the references
 is only meaningful against this floor.
 
+### 5. Text lanes (new 2026.11.04.1)
+
+A deployment whose API returns no log-probabilities cannot define or be
+judged against a band. Z.ai's own API is the case today: it serves GLM 5.2,
+5.3 and 5.3 Flash at temperature 0 (and turns thinking off for 5.2 with
+`reasoning_effort: none`) but ignores `logprobs`. Such a lane is declared
+with `"evidence": "text"` in the matrix and probed exactly like the others.
+Its greedy content and relative prompt_tokens signature are compared with
+every lane, and the agreement counts are reported (`text_references` in the
+JSON, section 4b of the human report, one note per subject lane). Nothing
+in the verdict reads them: a text lane never counts toward the two logprob
+references a verdict needs, never widens or narrows a band, and never turns
+an `insufficient` into anything else. It exists so a reader with the
+vendor's key can see the relay reproduce the vendor's own answers, which is
+weaker evidence than a distribution match (short answers agree across many
+models) and is labelled as such. Measured 2026-11-04: Z.ai at temperature 0
+reproduces its own answers on only 9/12 prompts for GLM 5.2 and 6/12 for
+the thinking-only GLM 5.3 and 5.3 Flash, so its content agreement with the
+relay (9/12, 6/12, 7/12) sits at the level of the controls (7/12). The
+relative prompt_tokens shape is the part that carries information: 12/12
+with the relay and the logprob references for every GLM model, 9/12 for
+the MiniMax control.
+
+Moonshot's API for Kimi K3 refuses `logprobs` and accepts only temperature
+1, and the relay accepts only temperature 1 for that model too, so Kimi K3
+has no greedy path on either side and is not in the matrix.
+
 ## Verdict rules
 
 For each subject lane, with `band` the largest reference-pair distance on
@@ -307,6 +334,19 @@ about the weights.
 
 Model-level reasoning is in each run's report; the table above is the
 2026-11-03 calibration and will go stale.
+
+## Changes on 2026-11-04 and why
+
+- DeepSeek's own API (`api.deepseek.com`, model `deepseek-flash` with
+  `reasoning_effort: none`) returns top-5 logprobs and joins the DeepSeek
+  V4.1 Flash references, so the vendor's own deployment is in the band.
+- Z.ai joins as a text lane for the three GLM models (see Measurements 5).
+  GLM 5.2 is back in the matrix with Together as its one logprob reference
+  and reads `insufficient` until a second one exists; the text lane shows
+  what the relay's answers look like next to the vendor's.
+- The scheduled run is daily. The mark on deeprelay.ai reflects the latest
+  daily run and is withdrawn by the API when the latest run is older than
+  14 days.
 
 ## Changes on 2026-11-03 and why
 

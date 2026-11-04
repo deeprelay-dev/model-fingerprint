@@ -1430,7 +1430,7 @@ class ConfigTest(unittest.TestCase):
         cfg = mf.load_matrix()
         self.assertEqual(cfg["schema_version"], 1)
         entries = mf.model_entries(cfg)
-        self.assertEqual(len(entries), 4)
+        self.assertEqual(len(entries), 5)
         self.assertNotIn("deeprelay/kimi-k3", entries)  # the relay pins its temperature to 1.0
         for model, entry in entries.items():
             self.assertTrue(model.startswith("deeprelay/"), model)
@@ -1439,6 +1439,11 @@ class ConfigTest(unittest.TestCase):
             roles = [l["role"] for l in lanes]
             self.assertEqual(roles.count("subject"), 1, model)
             self.assertGreaterEqual(roles.count("reference"), 2, model)
+            # At least one reference must carry logprobs; text lanes inform only.
+            self.assertTrue(any(l["role"] == "reference" and not mf.is_text(l) for l in lanes), model)
+            for l in lanes:
+                if mf.is_text(l):
+                    self.assertNotIn("top_logprobs", l, l)
             self.assertGreaterEqual(roles.count("control"), 1, model)
             subj = next(l for l in lanes if l["role"] == "subject")
             self.assertEqual(subj["base_url"], "https://api.deeprelay.ai/v1", model)
@@ -1452,7 +1457,7 @@ class ConfigTest(unittest.TestCase):
                 self.assertNotIn("gpu.ai", json.dumps(l))
 
     def test_subject_asks_the_relay_for_five(self):
-        for model in ("deeprelay/deepseek-v4.1-flash", "deeprelay/glm-5.3",
+        for model in ("deeprelay/deepseek-v4.1-flash", "deeprelay/glm-5.2", "deeprelay/glm-5.3",
                       "deeprelay/glm-5.3-flash", "deeprelay/qwen3.8-flash"):
             subj = next(l for l in mf.load_lanes(model) if l["role"] == "subject")
             self.assertEqual(subj["top_logprobs"], 5, model)
@@ -1474,13 +1479,73 @@ class ConfigTest(unittest.TestCase):
             entry = mf.load_model_entry(model)
             self.assertEqual(entry["max_tokens"], 2000)
             self.assertNotIn("reasoning_effort", entry.get("request_extra") or {})
-        for model in ("deeprelay/deepseek-v4.1-flash", "deeprelay/qwen3.8-flash"):
+        for model in ("deeprelay/deepseek-v4.1-flash", "deeprelay/glm-5.2", "deeprelay/qwen3.8-flash"):
             self.assertEqual(mf.load_model_entry(model)["request_extra"], {"reasoning_effort": "none"})
 
     def test_prompts_keep_invisible_characters(self):
         self.assertIn("​", mf.PROMPTS["p03_tokenizer"])
         self.assertIn("\xa0", mf.PROMPTS["p03_tokenizer"])
         self.assertEqual(len(mf.PROMPTS), 12)
+
+
+class TextLaneTest(unittest.TestCase):
+    """A lane whose API offers no logprobs (a vendor's own endpoint) is
+    probed at temperature 0, compared on content and signature, reported,
+    and never judges."""
+    TEXT = {"name": "vendor", "role": "reference", "evidence": "text",
+            "base_url": "https://vendor.example/v1", "model": "m", "key_env": "V_KEY"}
+
+    def test_validation(self):
+        mf.validate_lanes(LANES + [self.TEXT])
+        with self.assertRaises(ValueError):
+            mf.validate_lanes(LANES + [dict(self.TEXT, evidence="vibes")])
+        with self.assertRaises(ValueError):
+            mf.validate_lanes([dict(l, evidence="text") if l["role"] == "subject" else l for l in LANES])
+
+    def test_probe_never_asks_for_logprobs(self):
+        bodies = []
+
+        def post(url, key, body, **_):
+            bodies.append(body)
+            return no_logprobs(prompt_tokens=9, content="ab")
+        payload, rec = mf.call_lane(dict(self.TEXT, top_logprobs=5), "k", "p01_capital", 0, None, post=post)
+        self.assertEqual(rec["status"], "ok")
+        self.assertEqual(rec["evidence"], "text")
+        self.assertNotIn("logprobs", bodies[0])
+        self.assertNotIn("top_logprobs", bodies[0])
+        self.assertEqual(bodies[0]["temperature"], 0)
+        self.assertFalse(payload["_fingerprint_logprobs_requested"])
+
+    def test_reported_but_never_counted_or_judging(self):
+        lanes = LANES + [self.TEXT]
+        r = baseline()
+        fill(r, "vendor", lambda i, rep: no_logprobs(content="abc" if i != 3 else "z"))
+        rep = mf.analyze(lanes, r)
+        self.assertEqual(rep["verdict"], "pass")
+        t = rep["text_references"][0]
+        self.assertEqual(t["lane"], "vendor")
+        self.assertEqual(t["vs"]["subj"]["role"], "subject")
+        self.assertEqual(t["vs"]["subj"]["same_content"], len(mf.PROMPTS) - 1)
+        self.assertEqual(t["self_identical"], t["self_pairs"])
+        self.assertTrue(any(n.startswith("text lane vendor") for n in rep["notes"]), rep["notes"])
+        self.assertNotIn("vendor", rep["lane_verdicts"])
+        self.assertEqual(next(l for l in rep["lanes"] if l["name"] == "vendor")["evidence"], "text")
+        self.assertEqual(next(l for l in rep["lanes"] if l["name"] == "vendor")["fallback_prompts"], 0)
+        # Without the two logprob references the text lane does not fill in.
+        only_one = [l for l in lanes if l["name"] != "refB"]
+        r2 = {k: v for k, v in r.items() if k[0] != "refB"}
+        rep2 = mf.analyze(only_one, r2)
+        self.assertEqual(rep2["verdict"], "insufficient")
+        self.assertTrue(any("got 1" in x for x in rep2["reasons"]), rep2["reasons"])
+        self.assertEqual(rep2["text_references"][0]["lane"], "vendor")
+        self.assertTrue(rep2["notes"])
+
+    def test_render_has_a_text_section(self):
+        lanes = LANES + [self.TEXT]
+        r = baseline()
+        fill(r, "vendor", lambda i, rep: no_logprobs(content="abc"))
+        rep = mf.analyze(lanes, r)
+        self.assertIn("4b. TEXT LANES", mf.render(rep, r))
 
 
 if __name__ == "__main__":
