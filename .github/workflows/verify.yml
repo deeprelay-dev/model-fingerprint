@@ -1,6 +1,7 @@
-# Scheduled model-weights verification. Runs the whole matrix against
-# api.deeprelay.ai and two independent reference deployments per model, then
-# publishes the report to the deeprelay ingest endpoints.
+# Daily model-weights verification. Runs the whole matrix against
+# api.deeprelay.ai, the vendors' own APIs and independent reference
+# deployments per model, then publishes the report to the deeprelay ingest
+# endpoints. The verified mark on deeprelay.ai reflects the latest daily run.
 #
 # Triggers are schedule and workflow_dispatch ONLY. Never pull_request: the
 # job holds provider keys, and a PR from a fork must not be able to run with
@@ -12,7 +13,7 @@ name: verify
 
 on:
   schedule:
-    - cron: "17 */6 * * *"
+    - cron: "17 6 * * *"
   workflow_dispatch:
     inputs:
       models:
@@ -50,16 +51,18 @@ jobs:
           HAS_TOGETHER: ${{ secrets.TOGETHER_API_KEY != '' }}
           HAS_FIREWORKS: ${{ secrets.FIREWORKS_API_KEY != '' }}
           HAS_DASHSCOPE: ${{ secrets.DASHSCOPE_API_KEY != '' }}
+          HAS_DEEPSEEK: ${{ secrets.DEEPSEEK_API_KEY != '' }}
+          HAS_ZAI: ${{ secrets.ZAI_API_KEY != '' }}
         run: |
           if [ "$HAS_DEEPRELAY" != "true" ]; then
             echo "::error::DEEPRELAY_API_KEY is not configured: the subject lane cannot run, nothing can be judged"
             exit 1
           fi
-          if [ "$HAS_TOGETHER" != "true" ] && [ "$HAS_FIREWORKS" != "true" ] && [ "$HAS_DASHSCOPE" != "true" ]; then
+          if [ "$HAS_TOGETHER" != "true" ] && [ "$HAS_FIREWORKS" != "true" ] && [ "$HAS_DASHSCOPE" != "true" ] && [ "$HAS_DEEPSEEK" != "true" ]; then
             echo "::error::no reference key is configured: no same-model band can be measured"
             exit 1
           fi
-          echo "keys: deeprelay=$HAS_DEEPRELAY together=$HAS_TOGETHER fireworks=$HAS_FIREWORKS dashscope=$HAS_DASHSCOPE"
+          echo "keys: deeprelay=$HAS_DEEPRELAY together=$HAS_TOGETHER fireworks=$HAS_FIREWORKS dashscope=$HAS_DASHSCOPE deepseek=$HAS_DEEPSEEK zai=$HAS_ZAI"
 
       - name: Run the matrix
         id: run
@@ -68,6 +71,8 @@ jobs:
           TOGETHER_API_KEY: ${{ secrets.TOGETHER_API_KEY }}
           FIREWORKS_API_KEY: ${{ secrets.FIREWORKS_API_KEY }}
           DASHSCOPE_API_KEY: ${{ secrets.DASHSCOPE_API_KEY }}
+          DEEPSEEK_API_KEY: ${{ secrets.DEEPSEEK_API_KEY }}
+          ZAI_API_KEY: ${{ secrets.ZAI_API_KEY }}
           MODELS: ${{ github.event.inputs.models }}
         run: |
           set +e

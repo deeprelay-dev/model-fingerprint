@@ -93,7 +93,7 @@ import time
 import urllib.error
 import urllib.request
 
-HARNESS_VERSION = "2026.11.04"
+HARNESS_VERSION = "2026.11.04.1"
 
 HERE = pathlib.Path(__file__).resolve().parent
 DEFAULT_LANES_FILE = HERE / "matrix.json"
@@ -188,7 +188,18 @@ ANCHOR_PROMPT = "p01_capital"
 VERDICT_ROLES = ("subject", "relay")
 ROLES = ("reference", "subject", "relay", "control")
 LANE_KEYS = ("name", "role", "base_url", "model", "key_env")
-LANE_OPTIONAL_KEYS = ("top_logprobs", "request_extra", "stream", "max_tokens", "advisory", "_comment")
+LANE_OPTIONAL_KEYS = ("top_logprobs", "request_extra", "stream", "max_tokens", "advisory", "evidence",
+                      "_comment")
+# What a lane can contribute. "logprobs" lanes (the default) carry top-k
+# token log-probabilities and define or are judged against the same-model
+# band. A "text" lane is a deployment whose API offers no logprobs (a
+# vendor's own endpoint, typically): it is probed at temperature 0 like
+# every other lane and its greedy content and prompt_tokens signature are
+# compared with every lane, but it never defines a band, never counts
+# toward the two logprob references a verdict needs, and never changes a
+# verdict. It is reported so a reader with that vendor's key can see the
+# relay reproduce the vendor's own answers.
+EVIDENCE = ("logprobs", "text")
 # Run directory names: UTC date T hhmmss + 9 nanosecond digits + Z.
 RUN_DIR_RE = re.compile(r"^\d{8}T\d{15}Z$")
 METRICS = {"jsd": (JS_BAND_CEILING, JS_LIMIT_CEILING),
@@ -257,7 +268,18 @@ def validate_lanes(lanes):
             raise ValueError(f"duplicate lane name {l['name']!r}")
         if l.get("request_extra") is not None and not isinstance(l["request_extra"], dict):
             raise ValueError(f"lane {l['name']!r}: request_extra must be an object")
+        if l.get("evidence") is not None and l["evidence"] not in EVIDENCE:
+            raise ValueError(f"lane {l['name']!r} has unknown evidence {l['evidence']!r}; "
+                             f"expected one of {', '.join(EVIDENCE)}")
+        if l.get("evidence") == "text" and l["role"] in VERDICT_ROLES:
+            raise ValueError(f"lane {l['name']!r}: a {l['role']} lane cannot be text-only; "
+                             "the verdict needs its logprobs")
         names.add(l["name"])
+
+
+def is_text(lane):
+    """A lane probed without logprobs by design (see EVIDENCE)."""
+    return lane.get("evidence") == "text"
 
 
 def relay_lane(model, base, key_env="DEEPRELAY_API_KEY", top_logprobs=1,
@@ -505,9 +527,11 @@ def call_lane(lane, key, pid, rep, raw_dir, post=post_json, budget=None, deadlin
     spends one budget unit."""
     base = {"lane": lane["name"], "prompt": pid, "rep": rep, "http_calls": 0, "retries": 0}
     url = lane["base_url"].rstrip("/") + "/chat/completions"
-    with_lp = True
-    k = lane.get("top_logprobs") or 0
-    can_fallback = lane["role"] in VERDICT_ROLES
+    with_lp = not is_text(lane)
+    k = (lane.get("top_logprobs") or 0) if with_lp else 0
+    can_fallback = lane["role"] in VERDICT_ROLES and with_lp
+    if not with_lp:
+        base["evidence"] = "text"
     prepaid = False
     err = None
 
@@ -902,8 +926,9 @@ def analyze(lanes, responses, replicates=DEFAULT_REPLICATES, skipped=()):
     counts = {l["name"]: sum(1 for pid in PROMPTS if get(l["name"], pid)) for l in lanes}
     width = {n: max((topk_width(get(n, pid)) for pid in PROMPTS if get(n, pid)), default=0)
              for n in present}
-    fallback = {n: sum(1 for pid in PROMPTS if get(n, pid)
-                       and get(n, pid).get("_fingerprint_logprobs_requested") is False)
+    fallback = {n: (0 if is_text(by[n]) else
+                    sum(1 for pid in PROMPTS if get(n, pid)
+                        and get(n, pid).get("_fingerprint_logprobs_requested") is False))
                 for n in present}
     # The top_logprobs actually requested on the lane's successful probes
     # (after any step-down), as the smallest width any prompt was served at.
@@ -1000,6 +1025,7 @@ def analyze(lanes, responses, replicates=DEFAULT_REPLICATES, skipped=()):
                    "reasoning_prompts": reasoning[n], "thinking_prompts": thinking[n],
                    "empty_content_prompts": empty[n],
                    "stream": bool(by[n].get("stream")),
+                   "evidence": "text" if is_text(by[n]) else "logprobs",
                    "signature": [signature[n].get(pid) for pid in PROMPTS],
                    "signature_offset": offset[n]}
                   for n in present],
@@ -1018,6 +1044,43 @@ def analyze(lanes, responses, replicates=DEFAULT_REPLICATES, skipped=()):
         "lane_verdicts": {},
         "controls": [],
     }
+
+    # Text lanes: greedy content and signature agreement with every other
+    # lane, plus their own replicate determinism. Informational: nothing
+    # below reads it (see EVIDENCE).
+    def pair_of(x, y):
+        return pairs.get((x, y)) or pairs.get((y, x))
+
+    text_refs, text_notes = [], []
+    for t in [n for n in present if is_text(by[n])]:
+        reps = [(get(t, pid, 0), get(t, pid, 1)) for pid in PROMPTS]
+        reps = [(a, b) for a, b in reps if a is not None and b is not None]
+        entry = {"lane": t, "model": by[t]["model"], "base_url": by[t]["base_url"],
+                 "prompts": counts[t],
+                 "self_identical": sum(1 for a, b in reps
+                                       if emitted(a)[1].strip() == emitted(b)[1].strip()),
+                 "self_pairs": len(reps), "vs": {}}
+        for o in present:
+            if o == t or is_text(by[o]):
+                continue
+            pr = pair_of(t, o)
+            if pr is None:
+                continue
+            entry["vs"][o] = {"role": by[o]["role"], "same_content": pr["same_content"],
+                              "compared": pr["compared"], "signature_match": pr["signature_match"],
+                              "signature_compared": pr["signature_compared"]}
+        text_refs.append(entry)
+        subj = [(o, v) for o, v in entry["vs"].items() if v["role"] in VERDICT_ROLES]
+        ctrl = [v for o, v in entry["vs"].items() if v["role"] == "control"]
+        for o, v in subj:
+            worst = max((c["same_content"] for c in ctrl), default=None)
+            text_notes.append(
+                f"text lane {t} ({by[t]['model']} at {by[t]['base_url']}): {o} gave identical "
+                f"content on {v['same_content']}/{v['compared']} prompts and the same signature "
+                f"shape on {v['signature_match']}/{v['signature_compared']}"
+                + (f"; the controls at most {worst}/{v['compared']}" if worst is not None else "")
+                + "; text lanes inform, they do not judge")
+    report["text_references"] = text_refs
 
     # Coverage guards: what was configured must actually have been measured.
     insufficient = []
@@ -1069,7 +1132,7 @@ def analyze(lanes, responses, replicates=DEFAULT_REPLICATES, skipped=()):
                 f"prompts (need >= {MIN_COMPARED}); a skipped, revoked or rate-limited lane "
                 "is never left out of the verdict")
     if insufficient:
-        report.update(verdict="insufficient", reasons=insufficient)
+        report.update(verdict="insufficient", reasons=insufficient, notes=text_notes)
         return report
 
     reasons = []
@@ -1300,7 +1363,7 @@ def analyze(lanes, responses, replicates=DEFAULT_REPLICATES, skipped=()):
         verdict = "pass"
     report["verdict"] = verdict
     report["reasons"] = reasons
-    report["notes"] = notes
+    report["notes"] = text_notes + notes
     return report
 
 
@@ -1376,6 +1439,15 @@ def render(report, responses):
                 if l.get("topk_requested") and l.get("topk_served") != l.get("topk_requested") else "")
         out.append(f"  {l['name']:18s} [{l['role']:9s}] k={l['topk']}{step} offset={l.get('signature_offset')} "
                    f"{sig}{tail}")
+
+    if report.get("text_references"):
+        h("4b. TEXT LANES (no logprobs offered; greedy content agreement, r0; inform, do not judge)")
+        for t in report["text_references"]:
+            out.append(f"  {t['lane']:18s} {t['model']} at {t['base_url']}   replicate-identical "
+                       f"{t['self_identical']}/{t['self_pairs']}")
+            for o, v in t["vs"].items():
+                out.append(f"{'':20s}vs {o:16s} [{v['role']:9s}] same content {v['same_content']}/{v['compared']}"
+                           f"   signature {v['signature_match']}/{v['signature_compared']}")
 
     if "band" in report:
         h("5. TWO-SAMPLE SUMMARY")

@@ -5,6 +5,22 @@ or the measurement loop, and is written into every report as
 `harness_version`. Reports from different harness versions are not
 comparable.
 
+## 2026.11.04.1
+
+- Text lanes (`"evidence": "text"`): a reference deployment whose API offers
+  no logprobs is probed at temperature 0, its greedy content and signature
+  shape are compared with every lane and reported (`text_references`,
+  report section 4b, a note per subject lane), and it never judges: not a
+  band, not one of the two logprob references, not a verdict change. On
+  the wire such a lane carries role `text_reference`, so the deeprelay API
+  does not count it among the deployments a verified model matched.
+- Matrix: DeepSeek's own API (`deepseek-flash`, top-5 logprobs) is a
+  reference for DeepSeek V4.1 Flash. Z.ai (no logprobs) is a text lane for
+  GLM 5.2, GLM 5.3 and GLM 5.3 Flash. GLM 5.2 is back, with Together as its
+  one logprob reference, and reads `insufficient` until a second exists.
+- The schedule is daily. No change to prompts, thresholds or the metrics;
+  the version bump marks the new report fields.
+
 ## 2026.11.04
 
 - Matrix: GLM 5.2 is out until a second independent reference exists.

@@ -116,6 +116,11 @@ def model_result(entry, lanes, report):
         if l["role"] == "control":
             continue
         role = "subject" if l["role"] in mf.VERDICT_ROLES else l["role"]
+        if mf.is_text(l):
+            # Not an independent logprob deployment: the API counts
+            # "reference" lanes as the deployments a verified model matched,
+            # and a text lane did not take part in that judgement.
+            role = "text_reference"
         if role == "subject":
             v = lane_verdicts.get(l["name"], {}).get("verdict")
             wv = v or ("error" if fp.get("verdict") == "error" else "insufficient")
