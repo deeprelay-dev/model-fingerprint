@@ -1,0 +1,19 @@
+# Run outputs: reports, summaries and raw responses are artifacts, not source.
+report.json
+*-report.json
+summary.md
+raw/
+fp-raw/
+*.log
+
+# Local credentials must never be committed. Keys are read from the
+# environment only; nothing in this repository holds a key value.
+.env
+.env.*
+*credentials*.json
+*secret*
+
+__pycache__/
+*.pyc
+.pytest_cache/
+.DS_Store

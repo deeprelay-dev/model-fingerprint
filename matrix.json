@@ -1,0 +1,137 @@
+{
+  "schema_version": 1,
+  "_comment": [
+    "The model-weights fingerprint matrix. One entry per deeprelay model id.",
+    "Roles: subject = the deeprelay model id through api.deeprelay.ai, exactly as a customer calls it (judged);",
+    "reference = an independently operated deployment of the same weights (two are needed: their mutual distance",
+    "is the same-model band); control = a deliberately different model that must separate from the references,",
+    "which is what proves the check can tell models apart.",
+    "key_env names an environment variable; never put a key value in this file.",
+    "request_extra on a model is merged into EVERY lane's request body for that model, so all lanes condition on",
+    "the same thing (for example reasoning_effort: none). A lane's own request_extra is merged on top; a null",
+    "value removes a key for that lane. max_tokens on a model applies to all its lanes.",
+    "top_logprobs on the subject lane is what to ask the relay for (5). When the relay rejects top_logprobs with",
+    "a 400 the harness steps the same probe down to 1, then to no logprobs; the width actually served is in the",
+    "report (lanes[].topk and topk_served).",
+    "stream: true sends stream: true with stream_options.include_usage and folds the SSE deltas back into the",
+    "non-stream response shape (Together serves some models stream-only).",
+    "Models the relay cannot serve at temperature 0 are not listed, because the method compares greedy paths:",
+    "Kimi K3 is the current example (the relay pins its temperature to 1.0 for that upstream)."
+  ],
+  "defaults": {
+    "replicates": 2,
+    "max_tokens": 300,
+    "workers": 4,
+    "max_requests": 300,
+    "deadline_s": 600,
+    "request_timeout_seconds": 180
+  },
+  "models": [
+    {
+      "id": "deeprelay/deepseek-v4.1-flash",
+      "display_name": "DeepSeek V4.1 Flash",
+      "weights": "deepseek-ai/DeepSeek-V4.1-Flash",
+      "request_extra": {"reasoning_effort": "none"},
+      "max_tokens": 300,
+      "_comment": [
+        "The 1017 checkpoint thinks by default on every provider; reasoning_effort: none turns it off on all",
+        "three lanes (prompt_tokens 14 on p01 everywhere, content-only logprob streams).",
+        "Controls: MiniMax M3 on Fireworks (different family; gating) and the pre-1017 checkpoint on Together",
+        "(same family, same template; ADVISORY: at the relay's k=1 it measured lp_delta 0.025-0.030 against",
+        "limits of 0.022-0.029 across three runs on 2026-11-03, the edge of what the metric resolves, so it",
+        "is reported every run but does not gate the verdict). gpt-oss-120b is NOT",
+        "a usable control at k=1: it answers the short prompts with the same near-certainty (lp_delta 0.007)",
+        "and its relative signature differs on only 4/12 prompts; see METHOD.md, 'What the test cannot exclude'."
+      ],
+      "lanes": [
+        {"name": "deeprelay", "role": "subject", "base_url": "https://api.deeprelay.ai/v1",
+         "model": "deeprelay/deepseek-v4.1-flash", "key_env": "DEEPRELAY_API_KEY", "top_logprobs": 5},
+        {"name": "together", "role": "reference", "base_url": "https://api.together.xyz/v1",
+         "model": "deepseek-ai/DeepSeek-V4.1-Flash-1017", "key_env": "TOGETHER_API_KEY", "top_logprobs": 5},
+        {"name": "fireworks", "role": "reference", "base_url": "https://api.fireworks.ai/inference/v1",
+         "model": "accounts/fireworks/models/deepseek-v4p1-flash-1017", "key_env": "FIREWORKS_API_KEY", "top_logprobs": 5},
+        {"name": "ctrl_v41flash_pre1017", "role": "control", "base_url": "https://api.together.xyz/v1",
+         "model": "deepseek-ai/DeepSeek-V4.1-Flash", "key_env": "TOGETHER_API_KEY", "top_logprobs": 5,
+         "advisory": true},
+        {"name": "ctrl_minimax_m3", "role": "control", "base_url": "https://api.fireworks.ai/inference/v1",
+         "model": "accounts/fireworks/models/minimax-m3", "key_env": "FIREWORKS_API_KEY", "top_logprobs": 5}
+      ]
+    },
+    {
+      "id": "deeprelay/glm-5.3",
+      "display_name": "GLM 5.3",
+      "weights": "zai-org/GLM-5.3",
+      "max_tokens": 2000,
+      "_comment": [
+        "Thinking-only on every provider (disabling returns 400), so thinking stays ON everywhere and only the",
+        "content segment of each logprob stream is compared. max_tokens 2000 so the reasoning does not exhaust",
+        "the budget before any content is emitted. Controls: GLM 5.3 Flash on Fireworks (sibling, thinking on,",
+        "content-sliced) and MiniMax M3 on Fireworks (different family, thinking on, content-sliced).",
+        "Measured 2026-11-03: the sibling is NOT separable (JS 0.030 vs limit 0.076), so this model reads",
+        "inconclusive until the method can tell GLM 5.3 from GLM 5.3 Flash; see METHOD.md."
+      ],
+      "lanes": [
+        {"name": "deeprelay", "role": "subject", "base_url": "https://api.deeprelay.ai/v1",
+         "model": "deeprelay/glm-5.3", "key_env": "DEEPRELAY_API_KEY", "top_logprobs": 5},
+        {"name": "together", "role": "reference", "base_url": "https://api.together.xyz/v1",
+         "model": "zai-org/GLM-5.3", "key_env": "TOGETHER_API_KEY", "top_logprobs": 5},
+        {"name": "fireworks", "role": "reference", "base_url": "https://api.fireworks.ai/inference/v1",
+         "model": "accounts/fireworks/models/glm-5p3", "key_env": "FIREWORKS_API_KEY", "top_logprobs": 5},
+        {"name": "ctrl_glm53flash", "role": "control", "base_url": "https://api.fireworks.ai/inference/v1",
+         "model": "accounts/fireworks/models/glm-5p3-flash", "key_env": "FIREWORKS_API_KEY", "top_logprobs": 5},
+        {"name": "ctrl_minimax_m3", "role": "control", "base_url": "https://api.fireworks.ai/inference/v1",
+         "model": "accounts/fireworks/models/minimax-m3", "key_env": "FIREWORKS_API_KEY", "top_logprobs": 5}
+      ]
+    },
+    {
+      "id": "deeprelay/glm-5.3-flash",
+      "display_name": "GLM 5.3 Flash",
+      "weights": "zai-org/GLM-5.3-Flash",
+      "max_tokens": 2000,
+      "_comment": [
+        "Thinking-only, same treatment as GLM 5.3. Controls: GLM 5.3 on Fireworks (sibling) and MiniMax M3",
+        "on Fireworks (different family, thinking on, content-sliced). Measured 2026-11-03: the sibling is",
+        "NOT separable at k=1 (lp_delta 0.016 vs limit 0.077); inconclusive until it is."
+      ],
+      "lanes": [
+        {"name": "deeprelay", "role": "subject", "base_url": "https://api.deeprelay.ai/v1",
+         "model": "deeprelay/glm-5.3-flash", "key_env": "DEEPRELAY_API_KEY", "top_logprobs": 5},
+        {"name": "together", "role": "reference", "base_url": "https://api.together.xyz/v1",
+         "model": "zai-org/GLM-5.3-Flash", "key_env": "TOGETHER_API_KEY", "top_logprobs": 5},
+        {"name": "fireworks", "role": "reference", "base_url": "https://api.fireworks.ai/inference/v1",
+         "model": "accounts/fireworks/models/glm-5p3-flash", "key_env": "FIREWORKS_API_KEY", "top_logprobs": 5},
+        {"name": "ctrl_glm53", "role": "control", "base_url": "https://api.fireworks.ai/inference/v1",
+         "model": "accounts/fireworks/models/glm-5p3", "key_env": "FIREWORKS_API_KEY", "top_logprobs": 5},
+        {"name": "ctrl_minimax_m3", "role": "control", "base_url": "https://api.fireworks.ai/inference/v1",
+         "model": "accounts/fireworks/models/minimax-m3", "key_env": "FIREWORKS_API_KEY", "top_logprobs": 5}
+      ]
+    },
+    {
+      "id": "deeprelay/qwen3.8-flash",
+      "display_name": "Qwen 3.8 Flash",
+      "weights": "Qwen/Qwen3.8-Flash-Next",
+      "request_extra": {"reasoning_effort": "none"},
+      "max_tokens": 300,
+      "_comment": [
+        "Alibaba's own API serves the weights with top_logprobs 5 and needs enable_thinking: false on top of",
+        "reasoning_effort: none. Together serves the model stream-only. Fireworks does not serve it.",
+        "Measured 2026-11-03: the two references disagree by JS 0.056 (band near the ceiling of what a",
+        "different family scores, 0.08-0.09), so the controls sit on the limit: gpt-oss 0.093 vs 0.088",
+        "separates, MiniMax 0.083 does not. Both are kept; a run reads inconclusive when either is inside."
+      ],
+      "lanes": [
+        {"name": "deeprelay", "role": "subject", "base_url": "https://api.deeprelay.ai/v1",
+         "model": "deeprelay/qwen3.8-flash", "key_env": "DEEPRELAY_API_KEY", "top_logprobs": 5},
+        {"name": "alibaba", "role": "reference", "base_url": "https://dashscope.aliyuncs.com/compatible-mode/v1",
+         "model": "qwen3.8-flash", "key_env": "DASHSCOPE_API_KEY", "top_logprobs": 5,
+         "request_extra": {"enable_thinking": false}},
+        {"name": "together", "role": "reference", "base_url": "https://api.together.xyz/v1",
+         "model": "Qwen/Qwen3.8-Flash", "key_env": "TOGETHER_API_KEY", "top_logprobs": 5, "stream": true},
+        {"name": "ctrl_gptoss120b", "role": "control", "base_url": "https://api.together.xyz/v1",
+         "model": "openai/gpt-oss-120b", "key_env": "TOGETHER_API_KEY", "top_logprobs": 5},
+        {"name": "ctrl_minimax_m3", "role": "control", "base_url": "https://api.fireworks.ai/inference/v1",
+         "model": "accounts/fireworks/models/minimax-m3", "key_env": "FIREWORKS_API_KEY", "top_logprobs": 5}
+      ]
+    }
+  ]
+}

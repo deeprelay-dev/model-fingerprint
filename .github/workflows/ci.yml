@@ -1,0 +1,35 @@
+# Unit tests only. No secrets, no network: safe on pull requests from forks.
+name: ci
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    strategy:
+      matrix:
+        python: ["3.10", "3.12", "3.13"]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python }}
+      - name: Unit tests
+        run: python -m unittest discover -s . -p 'test_*.py' -v
+      - name: Matrix is valid and names no key values
+        run: |
+          python - <<'EOF'
+          import json, re
+          cfg = json.load(open("matrix.json"))
+          text = json.dumps(cfg)
+          assert not re.search(r"(sk-|fw_|hy_)[A-Za-z0-9]{8,}", text), "a key value in matrix.json"
+          assert "gpu.ai" not in text.lower()
+          print(len(cfg["models"]), "models")
+          EOF
