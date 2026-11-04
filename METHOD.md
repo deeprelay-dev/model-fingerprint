@@ -154,7 +154,13 @@ references a verdict needs, never widens or narrows a band, and never turns
 an `insufficient` into anything else. It exists so a reader with the
 vendor's key can see the relay reproduce the vendor's own answers, which is
 weaker evidence than a distribution match (short answers agree across many
-models) and is labelled as such.
+models) and is labelled as such. Measured 2026-11-04: Z.ai at temperature 0
+reproduces its own answers on only 9/12 prompts for GLM 5.2 and 6/12 for
+the thinking-only GLM 5.3 and 5.3 Flash, so its content agreement with the
+relay (9/12, 6/12, 7/12) sits at the level of the controls (7/12). The
+relative prompt_tokens shape is the part that carries information: 12/12
+with the relay and the logprob references for every GLM model, 9/12 for
+the MiniMax control.
 
 Moonshot's API for Kimi K3 refuses `logprobs` and accepts only temperature
 1, and the relay accepts only temperature 1 for that model too, so Kimi K3

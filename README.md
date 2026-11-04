@@ -50,8 +50,11 @@ A lane whose API offers no log-probabilities, which today means Z.ai for
 the GLM models, is a **text lane**: it is probed exactly like the others and
 its greedy answers and prompt_tokens shape are compared with every lane and
 printed in the report, but it never defines a band and never changes a
-verdict. With a Z.ai key you can watch the relay reproduce Z.ai's own
-answers; the verdict still rests on the logprob references.
+verdict. With a Z.ai key you can put Z.ai's own answers next to the
+relay's; the verdict still rests on the logprob references. Z.ai is not
+deterministic at temperature 0 (it reproduces its own answers on 6 to 9 of
+12 prompts), so expect the content agreement to be partial and read the
+signature column, which is exact.
 
 Kimi K3 is not listed. Moonshot's own API refuses `logprobs` and accepts
 only temperature 1 for `kimi-k3`, and the relay accepts only temperature 1
