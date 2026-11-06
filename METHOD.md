@@ -228,8 +228,11 @@ required.
 Coverage guards: a lane whose key is unset is skipped loudly; no subject
 lane, fewer than two references with top-k logprobs on 10 of 12 prompts, or
 a subject returning fewer than 10 of 12 prompts is **insufficient**. A
-429, 5xx or transport error is retried twice with backoff, and a prompt
-counts toward coverage if any replicate came back.
+429, 5xx or transport error is retried four times with growing backoff;
+a probe that still failed is sent once more after the whole sweep, minutes
+later, which is what an overloaded host needs (`reprobed` on the record,
+`source.reprobed` on the report). A prompt counts toward coverage if any
+replicate came back.
 
 ### Reference independence (new 2026-11-03)
 
@@ -334,6 +337,41 @@ about the weights.
 
 Model-level reasoning is in each run's report; the table above is the
 2026-11-03 calibration and will go stale.
+
+## Changes on 2026-11-06 and why
+
+- Retries and a re-probe pass. The scheduled run of 2026-11-06 read
+  DeepSeek V4.1 Flash `inconclusive` with its subject lane at `same_model`
+  (`lp_delta` 0.025 vs limit 0.047): Fireworks answered "service
+  overloaded" on 3 of 12 prompts of MiniMax M3, the model's only gating
+  control, two retries over 6 s did not outlast the burst, the control was
+  dropped at 9/12 and no gating control was left to demonstrate
+  separation. A probe is now retried four times with growing backoff
+  (2, 4, 6, 8 s), and every probe that still failed on a retryable error
+  is sent once more after the whole sweep, minutes later. The first local
+  run with this code re-probed one MiniMax probe on GLM 5.3 Flash that had
+  failed all four retries and recovered it. A re-probed record is marked
+  (`reprobed`, `first_error`) and counted in `source.reprobed`, so a
+  report shows how much of its coverage the second pass bought.
+- A second gating negative control on a different host for every model
+  that had one. A single gating control on a single host is a single point
+  of failure for the whole verdict. Measured 2026-11-06 (local run, all
+  references and controls at 12/12): Qwen 3.8 Flash on Together separates
+  from the DeepSeek V4.1 Flash references by signature on 7/12 prompts
+  (`lp_delta` 0.051 vs limit 0.060 at k = 1 does not separate on its own);
+  DeepSeek V4.1 Flash 1017 on Together separates from the GLM 5.2, GLM 5.3
+  and GLM 5.3 Flash references by signature on 3/12 and by JS distance
+  (0.060 vs limit 0.098 and 0.045 vs 0.066 at k = 5 for the two GLM 5.3
+  models). Qwen 3.8 Flash gets the same model as a third control: its two
+  controls sit on the limit (gpt-oss 0.086 and MiniMax 0.077 vs 0.082 and
+  0.095 across the day's two local runs), and a run on which neither
+  clears it reads `inconclusive` for want of a control that separates on
+  the metric; DeepSeek V4.1 Flash 1017 measured JS 0.103 vs limit 0.082
+  with signature differing on 7/12. The verdicts did not move: DeepSeek
+  V4.1 Flash `pass`, Qwen 3.8 Flash `pass`, GLM 5.2 `insufficient`, the
+  GLM 5.3 pair `inconclusive` on the sibling control as before. The
+  subject lanes, references, prompts, thresholds and metrics are
+  unchanged, so the version bump marks the measurement loop.
 
 ## Changes on 2026-11-04 and why
 

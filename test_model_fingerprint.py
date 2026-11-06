@@ -1018,7 +1018,7 @@ class ReReviewTest(unittest.TestCase):
             self.assertNotEqual(rep["verdict"], "pass")
             self.assertLessEqual(v["limit"], mf.JS_TOLERANCE * mf.NOISE_CAP_X * rep["band"]["jsd"] + 1e-12)
 
-    def test_N2_transient_failures_are_retried_twice(self):
+    def test_N2_transient_failures_are_retried(self):
         seen = {}
 
         def flaky(url, key, body, **kw):
@@ -1032,7 +1032,7 @@ class ReReviewTest(unittest.TestCase):
         self.assertEqual(rep["verdict"], "pass", rep["reasons"])
         self.assertEqual(rep["requests"]["errors"], [])
 
-    def test_N2_a_third_failure_is_final(self):
+    def test_N2_a_failure_past_MAX_RETRIES_is_final_for_the_probe(self):
         calls, slept = [], []
 
         def post(url, key, body, **_):
@@ -1048,6 +1048,75 @@ class ReReviewTest(unittest.TestCase):
                          ("error", "rate_limited", 1 + mf.MAX_RETRIES, mf.MAX_RETRIES))
         self.assertEqual(len(slept), mf.MAX_RETRIES)
         self.assertEqual(slept, sorted(slept))  # backoff grows
+
+    def test_N2_a_probe_that_failed_every_retry_is_sent_again_after_the_sweep(self):
+        seen = {}
+
+        def overloaded_for_a_while(url, key, body, **kw):
+            k = (body["model"], body["messages"][0]["content"])
+            seen[k] = seen.get(k, 0) + 1
+            if seen[k] <= 1 + mf.MAX_RETRIES and body["model"] == "subj":
+                raise http_error(url, 503)
+            return two_post(GOOD)(url, key, body, **kw)
+        lines = []
+        # One worker so the first replicate of each subject prompt burns every
+        # retry before the second replicate even starts.
+        rep = mf.run({"model": "m", "workers": 1}, lanes=LANES,
+                     env={"S_KEY": "k", "A_KEY": "k", "B_KEY": "k"},
+                     post=overloaded_for_a_while, log=lines.append)
+        self.assertEqual(rep["verdict"], "pass", rep["reasons"])
+        self.assertEqual(rep["requests"]["errors"], [])
+        self.assertEqual(rep["source"]["reprobed"], len(P))
+        again = [l for l in lines if l.startswith("REPROBE:")]
+        self.assertEqual(len(again), 1, lines)
+        self.assertIn(f"{len(P)} probes on subj", again[0])
+        self.assertTrue(any("re-probe" in l and "plan:" in l for l in lines), lines)
+        self.assertIn(f"{len(P)} re-probed after the sweep", mf.render(rep, {}))
+
+    def test_N2_the_re_probe_pass_replaces_the_failed_record_and_sums_its_calls(self):
+        n = []
+
+        def post(url, key, body, **_):
+            n.append(1)
+            if len(n) <= 1 + mf.MAX_RETRIES:
+                raise http_error(url, 503)
+            return content_shape(["a"])
+        responses, records, skipped = mf.collect(
+            [LANES[1]], {"A_KEY": "k"}, None, 1, 100, workers=1, post=post)
+        rec = [r for r in records if r["prompt"] == P[0]][0]
+        self.assertEqual((rec["status"], rec["reprobed"], rec["first_error"]),
+                         ("ok", True, "http_5xx"))
+        self.assertEqual(rec["http_calls"], 2 + mf.MAX_RETRIES)
+        self.assertEqual(rec["retries"], mf.MAX_RETRIES)
+        self.assertEqual(len(records), len(P))  # replaced, not appended
+        self.assertEqual(len(responses), len(P))
+
+    def test_N2_the_re_probe_pass_leaves_non_retryable_errors_alone(self):
+        lines, n = [], []
+
+        def post(url, key, body, **_):
+            n.append(1)
+            if body["messages"][0]["content"] == mf.PROMPTS[P[0]]:
+                raise http_error(url, 401)
+            return content_shape(["a"])
+        responses, records, _ = mf.collect(
+            [LANES[1]], {"A_KEY": "k"}, None, 1, 100, workers=1, post=post, log=lines.append)
+        self.assertEqual(len(n), len(P))
+        self.assertFalse(any(l.startswith("REPROBE") for l in lines), lines)
+        bad = [r for r in records if r["status"] == "error"]
+        self.assertEqual([(r["taxonomy"], r.get("reprobed")) for r in bad], [("auth_error", None)])
+
+    def test_N2_the_re_probe_pass_is_skipped_when_the_budget_is_spent(self):
+        lines = []
+
+        def post(url, key, body, **_):
+            raise http_error(url, 503)
+        _, records, _ = mf.collect(
+            [LANES[1]], {"A_KEY": "k"}, None, 1, len(P), workers=1, post=post, log=lines.append)
+        self.assertTrue(any(l.startswith("REPROBE skipped") and "max-requests" in l
+                            for l in lines), lines)
+        self.assertEqual(sum(1 for r in records if r["status"] == "error"), len(P))
+        self.assertFalse(any(r.get("reprobed") for r in records))
 
     def test_N2_no_retry_on_auth_errors(self):
         calls = []

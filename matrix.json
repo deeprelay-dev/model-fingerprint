@@ -41,7 +41,11 @@
         "limits of 0.022-0.029 across three runs on 2026-11-03, the edge of what the metric resolves, so it",
         "is reported every run but does not gate the verdict). gpt-oss-120b is NOT",
         "a usable control at k=1: it answers the short prompts with the same near-certainty (lp_delta 0.007)",
-        "and its relative signature differs on only 4/12 prompts; see METHOD.md, 'What the test cannot exclude'."
+        "and its relative signature differs on only 4/12 prompts; see METHOD.md, 'What the test cannot exclude'.",
+        "Qwen 3.8 Flash on Together is the second gating control (added 2026-11-06, different host, so one",
+        "provider's outage cannot leave the model without a gating control): its relative signature differs on",
+        "7/12 prompts, which separates on its own; lp_delta 0.051 vs limit 0.060 at k=1 does not. Together",
+        "serves it stream-only."
       ],
       "lanes": [
         {"name": "deeprelay", "role": "subject", "base_url": "https://api.deeprelay.ai/v1",
@@ -56,7 +60,9 @@
          "model": "deepseek-ai/DeepSeek-V4.1-Flash", "key_env": "TOGETHER_API_KEY", "top_logprobs": 5,
          "advisory": true},
         {"name": "ctrl_minimax_m3", "role": "control", "base_url": "https://api.fireworks.ai/inference/v1",
-         "model": "accounts/fireworks/models/minimax-m3", "key_env": "FIREWORKS_API_KEY", "top_logprobs": 5}
+         "model": "accounts/fireworks/models/minimax-m3", "key_env": "FIREWORKS_API_KEY", "top_logprobs": 5},
+        {"name": "ctrl_qwen38flash", "role": "control", "base_url": "https://api.together.xyz/v1",
+         "model": "Qwen/Qwen3.8-Flash", "key_env": "TOGETHER_API_KEY", "top_logprobs": 5, "stream": true}
       ]
     },
     {
@@ -70,8 +76,10 @@
         "not carry it), so the model reads INSUFFICIENT: a verdict needs two logprob references. The",
         "vendor's own API (Z.ai) accepts temperature 0 and reasoning_effort none but returns no logprobs,",
         "so it is a text lane: its greedy answers and prompt_tokens shape are compared with every lane",
-        "and reported, without judging. Control: MiniMax M3 (different family; lp_delta 0.11 vs limit",
-        "0.046). gpt-oss-120b is not separable at k=1 (lp_delta 0.004, relative signature 11/12)."
+        "and reported, without judging. Controls: MiniMax M3 on Fireworks (different family; lp_delta 0.11 vs",
+        "limit 0.046) and DeepSeek V4.1 Flash 1017 on Together (added 2026-11-06, different host; relative",
+        "signature differs on 3/12 prompts). gpt-oss-120b is not separable at k=1 (lp_delta 0.004, relative",
+        "signature 11/12)."
       ],
       "lanes": [
         {"name": "deeprelay", "role": "subject", "base_url": "https://api.deeprelay.ai/v1",
@@ -81,7 +89,9 @@
         {"name": "zai", "role": "reference", "evidence": "text", "base_url": "https://api.z.ai/api/paas/v4",
          "model": "glm-5.2", "key_env": "ZAI_API_KEY"},
         {"name": "ctrl_minimax_m3", "role": "control", "base_url": "https://api.fireworks.ai/inference/v1",
-         "model": "accounts/fireworks/models/minimax-m3", "key_env": "FIREWORKS_API_KEY", "top_logprobs": 5}
+         "model": "accounts/fireworks/models/minimax-m3", "key_env": "FIREWORKS_API_KEY", "top_logprobs": 5},
+        {"name": "ctrl_v41flash", "role": "control", "base_url": "https://api.together.xyz/v1",
+         "model": "deepseek-ai/DeepSeek-V4.1-Flash-1017", "key_env": "TOGETHER_API_KEY", "top_logprobs": 5}
       ]
     },
     {
@@ -96,6 +106,8 @@
         "content-sliced) and MiniMax M3 on Fireworks (different family, thinking on, content-sliced).",
         "Measured 2026-11-03: the sibling is NOT separable (JS 0.030 vs limit 0.076), so this model reads",
         "inconclusive until the method can tell GLM 5.3 from GLM 5.3 Flash; see METHOD.md.",
+        "DeepSeek V4.1 Flash 1017 on Together (reasoning_effort none on that lane only) is the gating control",
+        "on a second host (added 2026-11-06): signature differs on 3/12, JS 0.060 vs limit 0.098 at k=5.",
         "Z.ai (the vendor) returns no logprobs; its lane is text-only and informs without judging."
       ],
       "lanes": [
@@ -110,7 +122,10 @@
         {"name": "ctrl_glm53flash", "role": "control", "base_url": "https://api.fireworks.ai/inference/v1",
          "model": "accounts/fireworks/models/glm-5p3-flash", "key_env": "FIREWORKS_API_KEY", "top_logprobs": 5},
         {"name": "ctrl_minimax_m3", "role": "control", "base_url": "https://api.fireworks.ai/inference/v1",
-         "model": "accounts/fireworks/models/minimax-m3", "key_env": "FIREWORKS_API_KEY", "top_logprobs": 5}
+         "model": "accounts/fireworks/models/minimax-m3", "key_env": "FIREWORKS_API_KEY", "top_logprobs": 5},
+        {"name": "ctrl_v41flash", "role": "control", "base_url": "https://api.together.xyz/v1",
+         "model": "deepseek-ai/DeepSeek-V4.1-Flash-1017", "key_env": "TOGETHER_API_KEY", "top_logprobs": 5,
+         "request_extra": {"reasoning_effort": "none"}}
       ]
     },
     {
@@ -122,6 +137,8 @@
         "Thinking-only, same treatment as GLM 5.3. Controls: GLM 5.3 on Fireworks (sibling) and MiniMax M3",
         "on Fireworks (different family, thinking on, content-sliced). Measured 2026-11-03: the sibling is",
         "NOT separable at k=1 (lp_delta 0.016 vs limit 0.077); inconclusive until it is.",
+        "DeepSeek V4.1 Flash 1017 on Together (reasoning_effort none on that lane only) is the gating control",
+        "on a second host (added 2026-11-06): signature differs on 3/12, JS 0.045 vs limit 0.066 at k=5.",
         "Z.ai (the vendor) returns no logprobs; its lane is text-only and informs without judging."
       ],
       "lanes": [
@@ -136,7 +153,10 @@
         {"name": "ctrl_glm53", "role": "control", "base_url": "https://api.fireworks.ai/inference/v1",
          "model": "accounts/fireworks/models/glm-5p3", "key_env": "FIREWORKS_API_KEY", "top_logprobs": 5},
         {"name": "ctrl_minimax_m3", "role": "control", "base_url": "https://api.fireworks.ai/inference/v1",
-         "model": "accounts/fireworks/models/minimax-m3", "key_env": "FIREWORKS_API_KEY", "top_logprobs": 5}
+         "model": "accounts/fireworks/models/minimax-m3", "key_env": "FIREWORKS_API_KEY", "top_logprobs": 5},
+        {"name": "ctrl_v41flash", "role": "control", "base_url": "https://api.together.xyz/v1",
+         "model": "deepseek-ai/DeepSeek-V4.1-Flash-1017", "key_env": "TOGETHER_API_KEY", "top_logprobs": 5,
+         "request_extra": {"reasoning_effort": "none"}}
       ]
     },
     {
@@ -150,7 +170,10 @@
         "reasoning_effort: none. Together serves the model stream-only. Fireworks does not serve it.",
         "Measured 2026-11-03: the two references disagree by JS 0.056 (band near the ceiling of what a",
         "different family scores, 0.08-0.09), so the controls sit on the limit: gpt-oss 0.093 vs 0.088",
-        "separates, MiniMax 0.083 does not. Both are kept; a run reads inconclusive when either is inside."
+        "separates, MiniMax 0.083 does not. Both are kept; a run reads inconclusive when either is inside.",
+        "DeepSeek V4.1 Flash 1017 on Together is the third control (added 2026-11-06): JS 0.103 vs limit 0.082",
+        "at k=5 and signature differs on 7/12, the widest margin of the three, so a day on which gpt-oss and",
+        "MiniMax both land inside the limit still has a control that separates on the metric."
       ],
       "lanes": [
         {"name": "deeprelay", "role": "subject", "base_url": "https://api.deeprelay.ai/v1",
@@ -163,7 +186,9 @@
         {"name": "ctrl_gptoss120b", "role": "control", "base_url": "https://api.together.xyz/v1",
          "model": "openai/gpt-oss-120b", "key_env": "TOGETHER_API_KEY", "top_logprobs": 5},
         {"name": "ctrl_minimax_m3", "role": "control", "base_url": "https://api.fireworks.ai/inference/v1",
-         "model": "accounts/fireworks/models/minimax-m3", "key_env": "FIREWORKS_API_KEY", "top_logprobs": 5}
+         "model": "accounts/fireworks/models/minimax-m3", "key_env": "FIREWORKS_API_KEY", "top_logprobs": 5},
+        {"name": "ctrl_v41flash", "role": "control", "base_url": "https://api.together.xyz/v1",
+         "model": "deepseek-ai/DeepSeek-V4.1-Flash-1017", "key_env": "TOGETHER_API_KEY", "top_logprobs": 5}
       ]
     }
   ]
