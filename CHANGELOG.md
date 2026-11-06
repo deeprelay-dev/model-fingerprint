@@ -5,6 +5,26 @@ or the measurement loop, and is written into every report as
 `harness_version`. Reports from different harness versions are not
 comparable.
 
+## 2026.11.06
+
+- Measurement loop: a 429, 5xx or transport error is retried four times
+  (was two) with growing backoff, and every probe that still failed on a
+  retryable error is sent once more after the whole sweep. On 2026-11-06
+  Fireworks answered "service overloaded" on 3 of 12 prompts of the only
+  gating control for DeepSeek V4.1 Flash, two retries over 6 s did not
+  outlast it, the control was dropped at 9/12 and the model read
+  `inconclusive` with its subject lane at `same_model`. A re-probed record
+  replaces the failed one and says so (`reprobed`, `first_error`); the
+  report's `source.reprobed` and the summary's SOURCE line count them.
+- Matrix: a second gating negative control on a different host for every
+  model that had only one, so one host's outage cannot leave a model with
+  no gating control: Qwen 3.8 Flash on Together for DeepSeek V4.1 Flash;
+  DeepSeek V4.1 Flash 1017 on Together for GLM 5.2, GLM 5.3, GLM 5.3
+  Flash and Qwen 3.8 Flash (for Qwen a third control, the first that
+  separates on JS distance with margin). Measured before shipping (see
+  METHOD.md, "Changes on 2026-11-06"). No change to prompts, thresholds
+  or the metrics.
+
 ## 2026.11.04.1
 
 - Text lanes (`"evidence": "text"`): a reference deployment whose API offers

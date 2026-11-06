@@ -48,8 +48,9 @@ Guards (a run that verified nothing must never read as green):
 
   * a lane whose key env var is unset is SKIPPED, loudly;
   * zero subject lanes is INSUFFICIENT;
-  * a 429, 5xx or transport error is retried MAX_RETRIES times with backoff;
-    a prompt counts toward coverage if ANY replicate came back;
+  * a 429, 5xx or transport error is retried MAX_RETRIES times with backoff,
+    and a probe that still failed is sent once more after the whole sweep
+    (REPROBE_PASSES); a prompt counts toward coverage if ANY replicate came back;
   * every subject lane must return at least MIN_COMPARED of the 12 prompts,
     and at least two references must return top-k logprobs on MIN_COMPARED
     prompts, else INSUFFICIENT;
@@ -93,7 +94,7 @@ import time
 import urllib.error
 import urllib.request
 
-HARNESS_VERSION = "2026.11.04.1"
+HARNESS_VERSION = "2026.11.06"
 
 HERE = pathlib.Path(__file__).resolve().parent
 DEFAULT_LANES_FILE = HERE / "matrix.json"
@@ -127,10 +128,20 @@ JS_BAND_CEILING = round(JS_LIMIT_CEILING / JS_TOLERANCE, 4)
 LP_BAND_CEILING = round(LP_LIMIT_CEILING / JS_TOLERANCE, 4)
 # Retries per probe on 429, 5xx or a transport error, with linear backoff
 # (RETRY_BACKOFF_S, 2 x RETRY_BACKOFF_S, ...). Together rate-limits some
-# models dynamically, so one retry is not enough.
-MAX_RETRIES = 2
+# models dynamically and Fireworks answers "service overloaded" in bursts
+# that outlast a few seconds: on 2026-11-06 two retries over 6 s lost 3 of
+# 12 prompts on a control lane and the run read inconclusive.
+MAX_RETRIES = 4
 RETRY_BACKOFF_S = 2.0
 RETRYABLE = ("rate_limited", "http_5xx", "timeout", "connect_error", "malformed")
+# After the whole sweep, every probe that still failed on a retryable error
+# is sent once more per pass: minutes have passed by then, which is what an
+# overloaded host needs. A pass is bounded by --max-requests and the run
+# deadline like everything else, and is skipped when fewer than
+# REPROBE_MIN_S remain. A re-probed record replaces the failed one and
+# says so ("reprobed": true, "first_error": the taxonomy it recovered from).
+REPROBE_PASSES = 1
+REPROBE_MIN_S = 30.0
 # Coverage floors. A verdict lane (and each reference) must return at least
 # MIN_COMPARED of the 12 prompts, and a distance comparison needs at least
 # MIN_ALIGNED prompts whose greedy content paths share a prefix.
@@ -623,7 +634,13 @@ def partition_lanes(lanes, env):
 def collect(lanes, env, raw_dir, replicates, max_requests, workers=DEFAULT_WORKERS,
             post=post_json, log=None, deadline_s=DEFAULT_DEADLINE_S):
     """Send every probe fresh. Returns (responses, records, skipped);
-    responses maps (lane_name, pid, rep) -> payload. Never reads raw_dir."""
+    responses maps (lane_name, pid, rep) -> payload. Never reads raw_dir.
+
+    Two stages: the sweep over every planned probe, then REPROBE_PASSES
+    passes over the probes whose every retry failed on a retryable error
+    (a host overloaded for the seconds the retries covered is usually fine
+    minutes later). A re-probed record replaces the failed one, carries
+    the summed http_calls and retries, and says so."""
     log = log or (lambda msg: None)
     runnable, skipped = partition_lanes(lanes, env)
     for s in skipped:
@@ -632,50 +649,79 @@ def collect(lanes, env, raw_dir, replicates, max_requests, workers=DEFAULT_WORKE
     fallback_max = sum(2 for lane, _, _ in jobs if lane["role"] in VERDICT_ROLES)
     log(f"plan: {len(jobs)} probes over {len(runnable)} lanes; up to "
         f"{(1 + MAX_RETRIES) * len(jobs) + fallback_max} HTTP calls counting {MAX_RETRIES} "
-        f"retries per probe and logprob step-downs/fallbacks, all bounded by --max-requests "
-        f"{max_requests}; deadline {deadline_s}s")
+        f"retries per probe and logprob step-downs/fallbacks, then {REPROBE_PASSES} re-probe "
+        f"pass over what still failed, all bounded by --max-requests {max_requests}; "
+        f"deadline {deadline_s}s")
     if len(jobs) > max_requests:
         raise RuntimeError(f"{len(jobs)} planned requests exceed --max-requests "
                            f"{max_requests}; raise it or cut --replicates")
     budget = Budget(max_requests)
     deadline = time.monotonic() + deadline_s
-    responses, records = {}, []
-    ex = concurrent.futures.ThreadPoolExecutor(max_workers=workers)
-    futs = {ex.submit(call_lane, lane, env[lane["key_env"]], pid, rep, raw_dir, post,
-                      budget, deadline): (lane["name"], pid, rep)
-            for lane, pid, rep in jobs}
-    taken = set()
+    responses, records = {}, {}
 
-    def take(f):
-        taken.add(f)
-        payload, rec = f.result()
-        records.append(rec)
-        if payload is not None:
-            responses[futs[f]] = payload
-        else:
-            log(f"ERROR {rec['lane']} {rec['prompt']} r{rec['rep']}: "
-                f"{rec['taxonomy']} {rec['error'][:160]}")
+    def sweep(batch):
+        ex = concurrent.futures.ThreadPoolExecutor(max_workers=workers)
+        futs = {ex.submit(call_lane, lane, env[lane["key_env"]], pid, rep, raw_dir, post,
+                          budget, deadline): (lane["name"], pid, rep)
+                for lane, pid, rep in batch}
+        taken = set()
 
-    try:
-        for f in concurrent.futures.as_completed(
-                futs, timeout=max(0.0, deadline - time.monotonic()) + 5):
-            take(f)
-    except concurrent.futures.TimeoutError:
-        # Sweep: a probe that finished after as_completed gave up still
-        # counts; only the genuinely unfinished ones become deadline errors.
-        for f, (name, pid, rep) in futs.items():
-            if f in taken:
-                continue
-            if f.done():
-                take(f)
+        def take(f):
+            taken.add(f)
+            payload, rec = f.result()
+            key = futs[f]
+            earlier = records.get(key)
+            if earlier is not None:
+                rec = dict(rec, reprobed=True, first_error=earlier.get("taxonomy"),
+                           http_calls=rec.get("http_calls", 0) + earlier.get("http_calls", 0),
+                           retries=rec.get("retries", 0) + earlier.get("retries", 0))
+            records[key] = rec
+            if payload is not None:
+                responses[key] = payload
             else:
-                records.append({"lane": name, "prompt": pid, "rep": rep, "http_calls": 0,
-                                "status": "error", "taxonomy": "deadline",
-                                "error": f"unfinished at the {deadline_s}s run deadline"})
-        log(f"DEADLINE: {deadline_s}s reached; unfinished probes recorded as errors")
-    finally:
-        ex.shutdown(wait=False, cancel_futures=True)
-    return responses, records, skipped
+                log(f"ERROR {rec['lane']} {rec['prompt']} r{rec['rep']}: "
+                    f"{rec['taxonomy']} {rec['error'][:160]}")
+
+        try:
+            for f in concurrent.futures.as_completed(
+                    futs, timeout=max(0.0, deadline - time.monotonic()) + 5):
+                take(f)
+        except concurrent.futures.TimeoutError:
+            # A probe that finished after as_completed gave up still counts;
+            # only the genuinely unfinished ones become deadline errors.
+            for f, (name, pid, rep) in futs.items():
+                if f in taken:
+                    continue
+                if f.done():
+                    take(f)
+                else:
+                    records[(name, pid, rep)] = {
+                        "lane": name, "prompt": pid, "rep": rep, "http_calls": 0,
+                        "status": "error", "taxonomy": "deadline",
+                        "error": f"unfinished at the {deadline_s}s run deadline"}
+            log(f"DEADLINE: {deadline_s}s reached; unfinished probes recorded as errors")
+        finally:
+            ex.shutdown(wait=False, cancel_futures=True)
+
+    sweep(jobs)
+    by_name = {lane["name"]: lane for lane in runnable}
+    for _ in range(REPROBE_PASSES):
+        again = [(by_name[name], pid, rep) for (name, pid, rep), r in records.items()
+                 if r["status"] == "error" and r.get("taxonomy") in RETRYABLE]
+        if not again:
+            break
+        names = ", ".join(sorted({lane["name"] for lane, _, _ in again}))
+        if deadline - time.monotonic() < REPROBE_MIN_S:
+            log(f"REPROBE skipped: {len(again)} probes on {names} still failed, but under "
+                f"{REPROBE_MIN_S:.0f}s of the run deadline remain")
+            break
+        if budget.used >= budget.limit:
+            log(f"REPROBE skipped: {len(again)} probes on {names} still failed, but "
+                f"--max-requests is exhausted")
+            break
+        log(f"REPROBE: {len(again)} probes on {names} failed every retry; sending them once more")
+        sweep(again)
+    return responses, list(records.values()), skipped
 
 
 def new_run_dir(model_dir):
@@ -1387,8 +1433,9 @@ def render(report, responses):
                    f"saved responses from {src.get('raw_dir')}; nothing was sent")
     elif src:
         saved = f", saved as run {src['run']}" if src.get("run") else ""
+        again = f", {src['reprobed']} re-probed after the sweep" if src.get("reprobed") else ""
         out.append(f"SOURCE: fresh run, {src.get('http_calls', 0)} HTTP calls, "
-                   f"{src.get('errors', 0)} probe errors{saved}")
+                   f"{src.get('errors', 0)} probe errors{again}{saved}")
     out.append(f"MODEL: {report.get('model')}   harness {report.get('harness_version', HARNESS_VERSION)}")
     for s in report.get("skipped_lanes", []):
         out.append(f"SKIPPED {s['lane']} ({s['role']}): {s['reason']}")
@@ -1535,7 +1582,8 @@ def run(config, lanes=None, env=None, post=post_json, log=None):
             source = {"mode": "fresh", "raw_dir": str(run_dir) if run_dir else None,
                       "run": run_dir.name if run_dir else None,
                       "http_calls": sum(r.get("http_calls", 0) for r in records),
-                      "errors": sum(1 for r in records if r["status"] == "error")}
+                      "errors": sum(1 for r in records if r["status"] == "error"),
+                      "reprobed": sum(1 for r in records if r.get("reprobed"))}
         report = analyze(lanes, responses, replicates, skipped)
         report["source"] = source
         report["requests"] = {
