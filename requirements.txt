@@ -1,0 +1,13 @@
+# The sampling test runs through the authors' published package. torch is
+# its heaviest dependency; install the CPU build first so pip does not pull
+# the CUDA wheels:
+#   pip install --index-url https://download.pytorch.org/whl/cpu "torch>=2.4"
+#   pip install -r requirements.txt
+model-equality-testing==0.0.2
+numpy>=1.26
+torch>=2.4
+# Undeclared imports of model-equality-testing 0.0.2 (its pvalue and dataset
+# modules import these at package import time).
+tqdm>=4.66
+transformers>=4.40
+matplotlib>=3.8

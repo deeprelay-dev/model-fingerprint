@@ -5,6 +5,33 @@ or the measurement loop, and is written into every report as
 `harness_version`. Reports from different harness versions are not
 comparable.
 
+## 2026.11.10
+
+- The judge is now Model Equality Testing (Gao, Liang, Guestrin, ICLR
+  2025), run through the authors' published package
+  `model-equality-testing` 0.0.2: every lane is sampled at temperature 1
+  on sixteen new prompts, fifteen times each, and the package's
+  `mmd_hamming` statistic and permutation p-value decide. The verdict is
+  calibrated the way the logprob fingerprint is: the reference
+  deployments' mutual MMD is the band, the subject must match its nearest
+  reference (p >= 0.05 or inside the band) and be closer to every
+  reference than to any control, and a gating control must separate with
+  p < 0.05 (`model_equality.py`; METHOD.md, "The judge since 2026.11.10").
+- The logprob fingerprint corroborates: it still runs on every host with
+  logprobs, its report and verdict are published as `logprobs_verdict`,
+  a logprob `mismatch` vetoes, an `inconclusive` or `insufficient`
+  changes nothing. `run_matrix.py --no-samples` restores the old
+  behaviour.
+- Vendor APIs without logprobs (Z.ai) are full references in the
+  sampling test; a text lane the sampling test judged is reported as a
+  `reference` on the wire.
+- Measured before shipping: GLM 5.3 and GLM 5.3 Flash, inconclusive on
+  every daily run since 2026-11-04 because logprobs could not tell the
+  siblings apart, both read `same_model` with all three sibling controls
+  rejected at p = 0.000 (numbers in METHOD.md, "Changes on 2026-11-10").
+- `requirements.txt`; CI on Python 3.11 to 3.13; matrix `defaults.samples`
+  and per-model `samples` blocks; report `settings.samples_*`.
+
 ## 2026.11.06
 
 - Measurement loop: a 429, 5xx or transport error is retried four times

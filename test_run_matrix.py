@@ -11,6 +11,7 @@ import unittest
 import urllib.error
 
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent))
+import model_equality as me  # noqa: E402
 import model_fingerprint as mf  # noqa: E402
 import publish  # noqa: E402
 import run_matrix as rm  # noqa: E402
@@ -31,6 +32,29 @@ def matrix_file(d, entries):
     return str(f)
 
 
+def canned_samples(verdict="pass", lane_verdict=None, judged=("refA", "refB"), reasons=()):
+    """A stand-in for me.run: the sampling test's report with one subject."""
+    lane_verdict = lane_verdict or {"pass": "same_model", "mismatch": "mismatch",
+                                    "inconclusive": "inconclusive"}.get(verdict, "insufficient")
+
+    def run_samples(entry, lanes, env, settings, **kw):
+        run_samples.calls.append((entry["id"], settings, kw))
+        subj = next((l["name"] for l in lanes if l["role"] in mf.VERDICT_ROLES), "subj")
+        return {"method": "model_equality_testing", "verdict": verdict, "reasons": list(reasons),
+                "lanes": [{"name": l["name"], "role": l["role"], "model": l["model"], "samples": 90,
+                           "planned": 90, **({} if l["name"] in judged or l["role"] in mf.VERDICT_ROLES
+                                            else {"dropped": "0/90 samples"})} for l in lanes],
+                "lane_verdicts": ({subj: {"verdict": lane_verdict, "reason": "canned", "distance": 0.02,
+                                          "p": 0.3, "band": 0.05, "references": {}}}
+                                  if verdict not in ("insufficient", "error") else {}),
+                "controls": [{"lane": "ctrl", "separates": verdict == "pass", "advisory": False}],
+                "pairs": [], "dropped": [], "notes": [],
+                "requests": 0 if verdict in ("error", "insufficient") else 450, "request_errors": [],
+                "text": "SAMPLES text"}
+    run_samples.calls = []
+    return run_samples
+
+
 def fake_run(responses_for):
     """A stand-in for mf.run that analyzes canned responses per model."""
     def run_model(config, lanes=None, env=None, log=None, **_):
@@ -47,15 +71,18 @@ def fake_run(responses_for):
 
 
 class ReportShapeTest(unittest.TestCase):
-    def run_one(self, responses, entries=None, models=None, env=None):
+    def run_one(self, responses, entries=None, models=None, env=None, samples="pass", extra_argv=()):
         with tempfile.TemporaryDirectory() as d:
             out = pathlib.Path(d) / "report.json"
             summ = pathlib.Path(d) / "summary.md"
             argv = ["--matrix", matrix_file(d, entries or [ENTRY]), "--json-out", str(out),
-                    "--summary-out", str(summ), "--quiet"]
+                    "--summary-out", str(summ), "--quiet", *extra_argv]
             if models:
                 argv += ["--models", models]
-            code = rm.main(argv, env=env or {}, run_model=fake_run(lambda m: responses))
+            run_samples = (samples if callable(samples) else
+                           canned_samples(samples) if samples else canned_samples())
+            code = rm.main(argv, env=env or {}, run_model=fake_run(lambda m: responses),
+                           run_samples=run_samples)
             return code, json.loads(out.read_text()), summ.read_text()
 
     def test_go_wire_contract(self):
@@ -82,7 +109,7 @@ class ReportShapeTest(unittest.TestCase):
         self.assertEqual(fp["verdict"], "pass")
         self.assertNotIn("text", fp)
         self.assertIsInstance(fp["requests"], int)  # Go: Requests int
-        self.assertEqual(fp["requests"], 7)
+        self.assertEqual(fp["requests"], 7 + 450)  # logprob probes + samples
         self.assertTrue(all(isinstance(x, str) for x in fp["skipped"]))  # Go: []string
         self.assertIsInstance(fp["band"]["jsd"], float)  # Go: map[string]*float64
         self.assertIn("noise_cap_x", fp["thresholds"])
@@ -96,10 +123,17 @@ class ReportShapeTest(unittest.TestCase):
         self.assertEqual(m["skipped"], {})
         self.assertEqual(rep["summary"]["models"], 1)
         self.assertEqual(rep["summary"]["lanes"], 3)
-        self.assertEqual(rep["summary"]["requests"], 7)
+        self.assertEqual(rep["summary"]["requests"], 7 + 450)
         self.assertEqual(rep["summary"]["verdicts"], {"pass": 1})
         self.assertEqual(rep["summary"]["errors"], {"rate_limited": 1})
-        self.assertIn("| M | **pass** | same_model |", md)
+        self.assertEqual(fp["method"], "model_equality_testing")
+        self.assertEqual(fp["logprobs_verdict"], "pass")
+        self.assertEqual(fp["samples"]["verdict"], "pass")
+        self.assertNotIn("text", fp["samples"])
+        self.assertEqual(s["samples_method"], "model_equality_testing")
+        self.assertEqual(s["samples_prompts"], len(me.PROMPT_IDS))
+        self.assertIn("| M | **pass** | pass |", md)
+
 
     def test_github_provenance(self):
         env = {"GITHUB_RUN_ID": "123", "GITHUB_SERVER_URL": "https://github.com",
@@ -121,7 +155,8 @@ class ReportShapeTest(unittest.TestCase):
     def test_inconclusive_counts_as_judged(self):
         lanes = [l for l in ENTRY["lanes"] if l["role"] != "control"]
         r = {k: v for k, v in baseline().items() if k[0] != "ctrl"}
-        code, rep, _ = self.run_one(r, entries=[dict(ENTRY, lanes=lanes)])
+        code, rep, _ = self.run_one(r, entries=[dict(ENTRY, lanes=lanes)],
+                                    samples=canned_samples("inconclusive", lane_verdict="same_model"))
         self.assertEqual(code, rm.EXIT_OK)
         # The lane matched; the RUN is inconclusive because no control
         # separated. The server marks a model verified only when both the
@@ -131,7 +166,7 @@ class ReportShapeTest(unittest.TestCase):
 
     def test_nothing_judged_exits_1(self):
         r = {k: v for k, v in baseline().items() if k[0] != "subj"}
-        code, rep, _ = self.run_one(r)
+        code, rep, _ = self.run_one(r, samples="insufficient")
         self.assertEqual(code, rm.EXIT_NOTHING_JUDGED)
         self.assertEqual(rep["models"][0]["lanes"][0]["weights_verdict"], "insufficient")
         self.assertEqual(rep["models"][0]["fingerprint"]["verdict"], "insufficient")
@@ -140,7 +175,7 @@ class ReportShapeTest(unittest.TestCase):
         with tempfile.TemporaryDirectory() as d:
             out = pathlib.Path(d) / "report.json"
             code = rm.main(["--matrix", matrix_file(d, [ENTRY]), "--json-out", str(out), "--quiet"],
-                           env={}, run_model=fake_run(lambda m: None))
+                           env={}, run_model=fake_run(lambda m: None), run_samples=canned_samples("error"))
             rep = json.loads(out.read_text())
         self.assertEqual(code, rm.EXIT_NOTHING_JUDGED)
         fp = rep["models"][0]["fingerprint"]
@@ -157,7 +192,8 @@ class ReportShapeTest(unittest.TestCase):
                            env={"A_KEY": "k", "B_KEY": "k"},
                            run_model=lambda config, lanes, env, log: mf.run(
                                config, lanes=lanes, env=env, log=log,
-                               post=lambda u, k, b, **_: content_shape(["a"], prompt_tokens=99 if "ctrl" in u else 40)))
+                               post=lambda u, k, b, **_: content_shape(["a"], prompt_tokens=99 if "ctrl" in u else 40)),
+                           run_samples=canned_samples("insufficient"))
             rep = json.loads(out.read_text())
         self.assertEqual(code, rm.EXIT_NOTHING_JUDGED)
         self.assertEqual(rep["models"][0]["skipped"], {"subj": "S_KEY is not set"})
@@ -174,16 +210,22 @@ class ReportShapeTest(unittest.TestCase):
         with tempfile.TemporaryDirectory() as d:
             out = pathlib.Path(d) / "report.json"
             mx = matrix_file(d, [ENTRY])
+            samples = canned_samples()
             rm.main(["--matrix", mx, "--json-out", str(out), "--raw-dir", str(pathlib.Path(d) / "raw"), "--quiet"],
-                    env=env, run_model=lambda config, lanes, env, log: mf.run(config, lanes=lanes, env=env, post=post))
+                    env=env, run_model=lambda config, lanes, env, log: mf.run(config, lanes=lanes, env=env, post=post),
+                    run_samples=samples)
             n = len(sent)
             self.assertGreater(n, 0)
+            self.assertFalse(samples.calls[-1][2]["analyze_only"])
+            self.assertTrue(samples.calls[-1][2]["raw_dir"].startswith(str(pathlib.Path(d) / "raw")))
             code = rm.main(["--matrix", mx, "--json-out", str(out), "--raw-dir", str(pathlib.Path(d) / "raw"),
                             "--analyze-only", "--quiet"],
                            env=env, run_model=lambda config, lanes, env, log: mf.run(
-                               config, lanes=lanes, env=env, post=lambda *a, **k: self.fail("sent in analyze-only")))
+                               config, lanes=lanes, env=env, post=lambda *a, **k: self.fail("sent in analyze-only")),
+                           run_samples=samples)
             rep = json.loads(out.read_text())
         self.assertEqual(len(sent), n)
+        self.assertTrue(samples.calls[-1][2]["analyze_only"])
         self.assertEqual(rep["models"][0]["fingerprint"]["source"]["mode"], "analyze_only")
         self.assertEqual(code, rm.EXIT_OK)
 
@@ -193,7 +235,8 @@ class ReportShapeTest(unittest.TestCase):
         self.assertEqual([m["id"] for m in rep["models"]], ["deeprelay/n"])
         with tempfile.TemporaryDirectory() as d:
             code = rm.main(["--matrix", matrix_file(d, two), "--json-out", str(pathlib.Path(d) / "r.json"),
-                            "--models", "deeprelay/zzz", "--quiet"], env={}, run_model=fake_run(lambda m: baseline()))
+                            "--models", "deeprelay/zzz", "--quiet"], env={}, run_model=fake_run(lambda m: baseline()),
+                           run_samples=canned_samples())
         self.assertEqual(code, rm.EXIT_NOTHING_JUDGED)
 
     def test_committed_matrix_runs_end_to_end_with_a_fake_post(self):
@@ -228,27 +271,141 @@ class ReportShapeTest(unittest.TestCase):
                                 "DASHSCOPE_API_KEY", "DEEPSEEK_API_KEY", "ZAI_API_KEY")}
         with tempfile.TemporaryDirectory() as d:
             out = pathlib.Path(d) / "report.json"
+            # The sampling test judged every reference lane, the vendor's
+            # text lanes included (it needs no logprobs).
+            samples = canned_samples("pass", judged=("together", "fireworks", "zai", "deepseek", "alibaba"))
             code = rm.main(["--json-out", str(out), "--quiet"], env=env,
                            run_model=lambda config, lanes, env, log: mf.run(config, lanes=lanes, env=env,
-                                                                            post=post_for(lanes)))
+                                                                            post=post_for(lanes)),
+                           run_samples=samples)
             rep = json.loads(out.read_text())
         self.assertEqual(len(rep["models"]), 5)
+        self.assertEqual(len(samples.calls), 5)
         for m in rep["models"]:
             fp = m["fingerprint"]
+            self.assertEqual(fp["method"], "model_equality_testing")
+            self.assertEqual(fp["samples"]["verdict"], "pass")
             if m["id"] == "deeprelay/glm-5.2":
-                # One logprob reference plus the vendor's text lane: reported,
-                # never judged, and the text lane is not a wire "reference".
-                self.assertEqual(fp["verdict"], "insufficient", fp["reasons"])
-                self.assertEqual([l["role"] for l in m["lanes"]], ["subject", "reference", "text_reference"])
+                # One logprob reference plus the vendor's text lane: the
+                # logprob fingerprint cannot judge, the sampling test can,
+                # and the vendor lane it judged is a wire "reference".
+                self.assertEqual(fp["logprobs_verdict"], "insufficient", fp["reasons"])
+                self.assertEqual(fp["verdict"], "pass", fp["reasons"])
+                self.assertEqual([l["role"] for l in m["lanes"]], ["subject", "reference", "reference"])
                 self.assertEqual(fp["text_references"][0]["lane"], "zai")
                 continue
             self.assertEqual(fp["verdict"], "pass", (m["id"], fp["reasons"]))
-            text = [l for l in m["lanes"] if l["role"] == "text_reference"]
+            self.assertEqual([l for l in m["lanes"] if l["role"] == "text_reference"], [])
             if m["id"].startswith("deeprelay/glm-5.3"):
-                self.assertEqual([l["name"] for l in text], ["zai"])
                 self.assertEqual(fp["text_references"][0]["vs"]["deeprelay"]["same_content"], 12)
+                self.assertEqual(samples.calls[[c[0] for c in samples.calls].index(m["id"])][1]["request_extra"],
+                                 {"reasoning_effort": "low"})
         self.assertEqual(code, rm.EXIT_OK)
         self.assertNotIn("sk-", json.dumps(rep))
+
+
+class CombinedVerdictTest(unittest.TestCase):
+    """The sampling test judges; the logprob fingerprint only vetoes."""
+
+    def test_combine(self):
+        self.assertEqual(rm.combine("pass", "pass"), "pass")
+        self.assertEqual(rm.combine("inconclusive", "pass"), "pass")
+        self.assertEqual(rm.combine("insufficient", "pass"), "pass")
+        self.assertEqual(rm.combine("error", "pass"), "pass")
+        self.assertEqual(rm.combine("mismatch", "pass"), "mismatch")
+        self.assertEqual(rm.combine("pass", "mismatch"), "mismatch")
+        self.assertEqual(rm.combine("pass", "inconclusive"), "inconclusive")
+        self.assertEqual(rm.combine("pass", "insufficient"), "insufficient")
+        self.assertEqual(rm.combine("pass", "error"), "error")
+        self.assertEqual(rm.combine("pass", None), "pass")
+        self.assertEqual(rm.combine("inconclusive", None), "inconclusive")
+
+    def run_pair(self, responses, samples, env=None):
+        with tempfile.TemporaryDirectory() as d:
+            out = pathlib.Path(d) / "report.json"
+            argv = ["--matrix", matrix_file(d, [ENTRY]), "--json-out", str(out), "--quiet"]
+            if samples == "--no-samples":
+                argv.append("--no-samples")
+                run_samples = canned_samples()
+            else:
+                run_samples = canned_samples(samples)
+            code = rm.main(argv, env=env or {}, run_model=fake_run(lambda m: responses),
+                           run_samples=run_samples)
+            return code, json.loads(out.read_text())["models"][0], run_samples
+
+    def subject(self, m):
+        return next(l for l in m["lanes"] if l["role"] == "subject")["weights_verdict"]
+
+    def test_logprob_inconclusive_with_samples_pass_is_verified(self):
+        # The GLM 5.3 situation: the sibling control cannot be told apart by
+        # logprobs, the sampling test tells it apart.
+        same_as_refs = lambda i, rep: content_shape(["a", "b", "c"], spread=0.02)
+        code, m, _ = self.run_pair(baseline(control=same_as_refs), "pass")
+        self.assertEqual(m["fingerprint"]["logprobs_verdict"], "inconclusive")
+        self.assertEqual((code, m["fingerprint"]["verdict"], self.subject(m)), (rm.EXIT_OK, "pass", "same_model"))
+
+    def test_samples_inconclusive_is_not_verified_even_if_logprobs_pass(self):
+        code, m, _ = self.run_pair(baseline(), "inconclusive")
+        self.assertEqual((code, m["fingerprint"]["verdict"], self.subject(m)),
+                         (rm.EXIT_OK, "inconclusive", "inconclusive"))
+
+    def test_logprob_mismatch_vetoes(self):
+        def far(i, rep):  # a top-5 distribution well outside the band
+            d = content_shape(["a", "b", "c"])
+            for row in d["choices"][0]["logprobs"]["content"]:
+                row["top_logprobs"] = [{"token": row["token"], "logprob": -1.2}] + [
+                    {"token": f"other{j}", "logprob": -1.3} for j in range(4)]
+            return d
+        code, m, _ = self.run_pair(baseline(subject=far), "pass")
+        self.assertEqual(m["fingerprint"]["logprobs_verdict"], "mismatch")
+        self.assertEqual((code, m["fingerprint"]["verdict"], self.subject(m)),
+                         (rm.EXIT_MISMATCH, "mismatch", "mismatch"))
+        self.assertEqual(m["fingerprint"]["lane_verdicts"]["subj"]["verdict"], "mismatch")
+        self.assertEqual(m["fingerprint"]["samples"]["verdict"], "pass")
+
+    def test_samples_mismatch_is_a_mismatch(self):
+        code, m, _ = self.run_pair(baseline(), "mismatch")
+        self.assertEqual((code, m["fingerprint"]["verdict"], self.subject(m)),
+                         (rm.EXIT_MISMATCH, "mismatch", "mismatch"))
+
+    def test_samples_error_is_not_verified(self):
+        code, m, _ = self.run_pair(baseline(), "error")
+        self.assertEqual((m["fingerprint"]["verdict"], self.subject(m)), ("error", "error"))
+
+    def test_no_samples_flag_keeps_the_logprob_verdict(self):
+        code, m, run_samples = self.run_pair(baseline(), "--no-samples")
+        self.assertEqual(run_samples.calls, [])
+        self.assertEqual((code, m["fingerprint"]["verdict"], self.subject(m)), (rm.EXIT_OK, "pass", "same_model"))
+        self.assertNotIn("samples", m["fingerprint"])
+        self.assertNotIn("method", m["fingerprint"])
+
+    def test_settings_and_run_dir_reach_the_sampling_test(self):
+        code, m, run_samples = self.run_pair(baseline(), "pass")
+        (mid, settings, kw), = run_samples.calls
+        self.assertEqual(mid, "deeprelay/m")
+        self.assertEqual(settings["request_extra"], {"reasoning_effort": "none"})
+        self.assertEqual(settings["per_prompt"], me.PER_PROMPT)
+        self.assertEqual(settings["deadline_s"], me.DEADLINE_S)
+        self.assertIsNone(settings["max_requests"])
+        self.assertNotIn("max_requests", kw)  # the sampling test sizes its own budget
+
+    def test_text_lane_judged_by_sampling_counts_as_a_reference(self):
+        entry = dict(ENTRY, lanes=ENTRY["lanes"] + [lane("zai", "reference", "Z_KEY", evidence="text")])
+        with tempfile.TemporaryDirectory() as d:
+            out = pathlib.Path(d) / "report.json"
+            argv = ["--matrix", matrix_file(d, [entry]), "--json-out", str(out), "--quiet"]
+            rm.main(argv, env={}, run_model=fake_run(lambda m: baseline()),
+                    run_samples=canned_samples("pass", judged=("refA", "refB", "zai")))
+            roles = {l["name"]: l["role"] for l in json.loads(out.read_text())["models"][0]["lanes"]}
+            self.assertEqual(roles["zai"], "reference")
+            rm.main(argv, env={}, run_model=fake_run(lambda m: baseline()),
+                    run_samples=canned_samples("pass", judged=("refA", "refB")))
+            roles = {l["name"]: l["role"] for l in json.loads(out.read_text())["models"][0]["lanes"]}
+            self.assertEqual(roles["zai"], "text_reference")
+            rm.main(argv + ["--no-samples"], env={}, run_model=fake_run(lambda m: baseline()),
+                    run_samples=canned_samples("pass"))
+            roles = {l["name"]: l["role"] for l in json.loads(out.read_text())["models"][0]["lanes"]}
+            self.assertEqual(roles["zai"], "text_reference")
 
 
 class PublishTest(unittest.TestCase):
