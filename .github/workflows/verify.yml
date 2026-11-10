@@ -1,7 +1,9 @@
 # Daily model-weights verification. Runs the whole matrix against
 # api.deeprelay.ai, the vendors' own APIs and independent reference
-# deployments per model, then publishes the report to the deeprelay ingest
-# endpoints. The verified mark on deeprelay.ai reflects the latest daily run.
+# deployments per model: the sampling test (Model Equality Testing, through
+# the authors' package) judges, the logprob fingerprint corroborates. The
+# report is published to the deeprelay ingest endpoints; the verified mark on
+# deeprelay.ai reflects the latest daily run.
 #
 # Triggers are schedule and workflow_dispatch ONLY. Never pull_request: the
 # job holds provider keys, and a PR from a fork must not be able to run with
@@ -36,9 +38,17 @@ concurrency:
 jobs:
   verify:
     runs-on: ubuntu-latest
-    timeout-minutes: 90
+    timeout-minutes: 150
     steps:
       - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install the sampling test's package (CPU torch)
+        run: |
+          python3 -m pip install --quiet --index-url https://download.pytorch.org/whl/cpu "torch>=2.4"
+          python3 -m pip install --quiet -r requirements.txt
 
       - name: Unit tests
         run: python3 -m unittest discover -s . -p 'test_*.py'

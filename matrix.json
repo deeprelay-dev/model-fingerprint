@@ -24,7 +24,8 @@
     "workers": 4,
     "max_requests": 300,
     "deadline_s": 600,
-    "request_timeout_seconds": 180
+    "request_timeout_seconds": 180,
+    "samples": {"per_prompt": 15, "max_tokens": 1200, "permutations": 100, "L": 200}
   },
   "models": [
     {
@@ -99,6 +100,8 @@
       "display_name": "GLM 5.3",
       "weights": "zai-org/GLM-5.3",
       "max_tokens": 2000,
+      "samples": {"request_extra": {"reasoning_effort": "low"}, "_comment":
+        "The sampling test lets the model think at low effort (thinking cannot be disabled), compares the visible answer."},
       "_comment": [
         "Thinking-only on every provider (disabling returns 400), so thinking stays ON everywhere and only the",
         "content segment of each logprob stream is compared. max_tokens 2000 so the reasoning does not exhaust",
@@ -133,6 +136,8 @@
       "display_name": "GLM 5.3 Flash",
       "weights": "zai-org/GLM-5.3-Flash",
       "max_tokens": 2000,
+      "samples": {"request_extra": {"reasoning_effort": "low"}, "_comment":
+        "The sampling test lets the model think at low effort (thinking cannot be disabled), compares the visible answer."},
       "_comment": [
         "Thinking-only, same treatment as GLM 5.3. Controls: GLM 5.3 on Fireworks (sibling) and MiniMax M3",
         "on Fireworks (different family, thinking on, content-sliced). Measured 2026-11-03: the sibling is",

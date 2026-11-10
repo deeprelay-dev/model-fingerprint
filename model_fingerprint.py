@@ -94,7 +94,7 @@ import time
 import urllib.error
 import urllib.request
 
-HARNESS_VERSION = "2026.11.06"
+HARNESS_VERSION = "2026.11.10"
 
 HERE = pathlib.Path(__file__).resolve().parent
 DEFAULT_LANES_FILE = HERE / "matrix.json"

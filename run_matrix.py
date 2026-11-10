@@ -1,8 +1,20 @@
 #!/usr/bin/env python3
-"""run_matrix: fingerprint every model in matrix.json and write ONE report
-in the deeprelay benchmark schema (schema_version 1), the document that
+"""run_matrix: verify every model in matrix.json and write ONE report in
+the deeprelay benchmark schema (schema_version 1), the document that
 POST /internal/benchmarks/ingest accepts and `deeprelay benchmarks latest`
 decodes.
+
+Two tests run per model and both land in the report:
+
+  * the sampling test, Model Equality Testing (Gao, Liang, Guestrin, ICLR
+    2025) through the authors' package: model_equality.py. This is the
+    judge. A model is verified when the relay's sampled completions sit
+    inside the band the reference deployments of the same weights span,
+    and a known-different control sits outside it;
+  * the top-k logprob fingerprint: model_fingerprint.py. Corroborating
+    evidence where a host returns logprobs; it cannot verify a model on
+    its own any more, but a logprob MISMATCH still vetoes a pass (logprob
+    analysis is the more sensitive instrument where it exists).
 
     python3 run_matrix.py --json-out report.json --raw-dir raw/ \\
         [--models deeprelay/deepseek-v4.1-flash,deeprelay/glm-5.3] [--summary-out summary.md]
@@ -29,6 +41,7 @@ import sys
 import time
 import urllib.parse
 
+import model_equality as me
 import model_fingerprint as mf
 
 SCHEMA_VERSION = 1
@@ -107,23 +120,57 @@ def fingerprint_section(report):
     return fp
 
 
-def model_result(entry, lanes, report):
-    """One matrix row's outcome in the bench schema."""
+def combine(logprob_verdict, samples_verdict):
+    """The published verdict. The sampling test judges; the logprob
+    fingerprint can only veto. With no sampling test (--no-samples, or the
+    package missing) the logprob verdict stands, as before 2026.11.10."""
+    if samples_verdict is None:
+        return logprob_verdict
+    if "mismatch" in (logprob_verdict, samples_verdict):
+        return "mismatch"
+    return samples_verdict
+
+
+def model_result(entry, lanes, report, samples=None):
+    """One matrix row's outcome in the bench schema. `samples` is the
+    model_equality.run() report, or None when the sampling test did not
+    run."""
     fp = fingerprint_section(report)
+    logprob_verdict = fp.get("verdict", "error")
+    if samples is not None:
+        sm = {k: v for k, v in samples.items() if k != "text"}
+        fp["samples"] = sm
+        fp["method"] = "model_equality_testing"
+        fp["logprobs_verdict"] = logprob_verdict
+        fp["verdict"] = combine(logprob_verdict, sm.get("verdict", "error"))
+        fp["reasons"] = list(sm.get("reasons") or []) + [f"logprobs: {r}" for r in fp.get("reasons") or []]
+        fp["requests"] = int(fp.get("requests", 0)) + int(sm.get("requests", 0) or 0)
+        fp["request_errors"] = list(fp.get("request_errors") or []) + list(sm.get("request_errors") or [])
+        judged_lanes = {l["name"] for l in sm.get("lanes", []) if not l.get("dropped")}
+        sample_verdicts = sm.get("lane_verdicts") or {}
+    else:
+        judged_lanes, sample_verdicts = set(), {}
     lane_verdicts = fp.get("lane_verdicts") or {}
     out_lanes = []
     for l in lanes:
         if l["role"] == "control":
             continue
         role = "subject" if l["role"] in mf.VERDICT_ROLES else l["role"]
-        if mf.is_text(l):
-            # Not an independent logprob deployment: the API counts
-            # "reference" lanes as the deployments a verified model matched,
-            # and a text lane did not take part in that judgement.
+        if mf.is_text(l) and l["name"] not in judged_lanes:
+            # Not an independent deployment the verdict compared against:
+            # the API counts "reference" lanes as the deployments a verified
+            # model matched. A text lane that took part in the sampling
+            # judgement is a reference; one that did not is listed only.
             role = "text_reference"
         if role == "subject":
-            v = lane_verdicts.get(l["name"], {}).get("verdict")
-            wv = v or ("error" if fp.get("verdict") == "error" else "insufficient")
+            lv = lane_verdicts.get(l["name"], {}).get("verdict")
+            lp = lv or ("error" if logprob_verdict == "error" else "insufficient")
+            if samples is not None:
+                sv = sample_verdicts.get(l["name"], {}).get("verdict")
+                sv = sv or ("error" if sm.get("verdict") == "error" else "insufficient")
+                wv = "mismatch" if "mismatch" in (lp, sv) else sv
+            else:
+                wv = lp
         else:
             wv = "reference"
         out_lanes.append({"name": l["name"], "role": role, "model": l["model"],
@@ -150,8 +197,9 @@ def exit_code(models):
 
 
 def build_report(matrix, results, run, settings):
-    """results: [(entry, lanes, run() report)] in matrix order."""
-    models = [model_result(entry, lanes, report) for entry, lanes, report in results]
+    """results: [(entry, lanes, logprob report, samples report or None)] in
+    matrix order."""
+    models = [model_result(entry, lanes, report, samples) for entry, lanes, report, samples in results]
     verdicts, errors = collections.Counter(), collections.Counter()
     requests = 0
     for m in models:
@@ -171,8 +219,8 @@ def build_report(matrix, results, run, settings):
     }
 
 
-def settings_block(defaults, replicates, max_tokens):
-    return {
+def settings_block(defaults, replicates, max_tokens, samples=True):
+    out = {
         "perf_trials": 0, "perf_max_tokens": 0, "perf_concurrency": 0, "perf_prompts": [],
         "fingerprint_replicates": replicates,
         "fingerprint_max_tokens": max_tokens,
@@ -180,6 +228,14 @@ def settings_block(defaults, replicates, max_tokens):
         "request_timeout_seconds": int(defaults.get("request_timeout_seconds", mf.DEFAULT_TIMEOUT)),
         "skip_perf": True, "skip_fingerprint": False,
     }
+    if samples:
+        d = (defaults or {}).get("samples") or {}
+        out.update({"samples_method": "model_equality_testing",
+                    "samples_prompts": len(me.PROMPT_IDS),
+                    "samples_per_prompt": int(d.get("per_prompt", me.PER_PROMPT)),
+                    "samples_max_tokens": int(d.get("max_tokens", me.MAX_TOKENS)),
+                    "samples_permutations": int(d.get("permutations", me.PERMUTATIONS))})
+    return out
 
 
 def _f(x, nd=4):
@@ -191,25 +247,28 @@ def summary_markdown(report):
              f"Run `{report['run']['id']}` ({report['run']['trigger']}), "
              f"{report['summary']['requests']} requests, verdicts: "
              + ", ".join(f"{k} {v}" for k, v in sorted(report["summary"]["verdicts"].items())), "",
-             "| model | verdict | subject | k | distance | limit | band | signature | why |",
-             "|---|---|---|---|---|---|---|---|---|"]
+             "| model | verdict | samples (MET) | mmd | band | p | control | logprobs | distance | limit | why |",
+             "|---|---|---|---|---|---|---|---|---|---|---|"]
     for m in report["models"]:
         fp = m["fingerprint"]
         subj = next((l for l in m["lanes"] if l["role"] == "subject"), None)
         lv = (fp.get("lane_verdicts") or {}).get(subj["name"], {}) if subj else {}
-        why = lv.get("reason") or "; ".join(fp.get("reasons") or []) or ""
-        sig = (f"{lv['signature_agree']}/{lv['signature_total']}" if "signature_agree" in lv else "")
+        sm = fp.get("samples") or {}
+        sv = (sm.get("lane_verdicts") or {}).get(subj["name"], {}) if subj else {}
+        ctrl = ", ".join(f"{c['lane']} {'yes' if c['separates'] else 'NO'}" for c in sm.get("controls") or [])
+        why = sv.get("reason") or lv.get("reason") or "; ".join(fp.get("reasons") or []) or ""
         lines.append(f"| {m['display_name']} | **{fp.get('verdict', 'error')}** | "
-                     f"{subj['weights_verdict'] if subj else 'n/a'} | {lv.get('k', '')} | "
-                     f"{_f(lv.get('distance'))} | {_f(lv.get('limit'))} | {_f(lv.get('band'))} | "
-                     f"{sig} | {why.replace('|', '/')} |")
-        extra = [r for r in fp.get("reasons") or [] if r != why] if lv.get("reason") else []
+                     f"{sm.get('verdict', 'n/a')} | {_f(sv.get('distance'))} | {_f(sv.get('band'))} | "
+                     f"{_f(sv.get('p'), 3)} | {ctrl} | "
+                     f"{fp.get('logprobs_verdict', fp.get('verdict', 'error')) if sm else fp.get('verdict', 'error')} | "
+                     f"{_f(lv.get('distance'))} | {_f(lv.get('limit'))} | {why.replace('|', '/')} |")
+        extra = [r for r in fp.get("reasons") or [] if r != why]
         for r in extra:
-            lines.append(f"|  | | | | | | | | {r.replace('|', '/')} |")
+            lines.append(f"|  | | | | | | | | | | {r.replace('|', '/')} |")
     return "\n".join(lines) + "\n"
 
 
-def main(argv=None, env=None, run_model=None):
+def main(argv=None, env=None, run_model=None, run_samples=None):
     ap = argparse.ArgumentParser(description=__doc__.split("\n\n")[0],
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--matrix", default=str(mf.DEFAULT_LANES_FILE))
@@ -224,9 +283,12 @@ def main(argv=None, env=None, run_model=None):
     ap.add_argument("--analyze-only", action="store_true",
                     help="re-judge the latest saved run of each model under --raw-dir; send nothing")
     ap.add_argument("--quiet", action="store_true", help="do not print the per-model text reports")
+    ap.add_argument("--no-samples", action="store_true",
+                    help="skip the sampling test (Model Equality Testing); the logprob fingerprint alone judges")
     args = ap.parse_args(argv)
     env = dict(os.environ) if env is None else env
     run_model = run_model or mf.run
+    run_samples = run_samples or me.run
     log = (lambda m: print(m, file=sys.stderr, flush=True))
 
     matrix = mf.load_matrix(args.matrix)
@@ -261,16 +323,28 @@ def main(argv=None, env=None, run_model=None):
                             "max_tokens": entry.get("max_tokens"),
                             "analyze_only": bool(args.analyze_only)},
                            lanes=lanes, env=env, log=log)
-        results.append((entry, lanes, report))
+        samples = None
+        sset = me.settings_for(entry, defaults)
+        if not args.no_samples and sset.get("enabled", True):
+            run_dir = (report.get("source") or {}).get("raw_dir")
+            # The sampling sweep has its own budget and deadline (matrix
+            # defaults.samples / the model's samples block): its request
+            # count is an order of magnitude above the logprob probes'.
+            samples = run_samples(entry, lanes, env, sset, raw_dir=run_dir, log=log,
+                                  analyze_only=bool(args.analyze_only))
+        results.append((entry, lanes, report, samples))
         if not args.quiet:
             print(report.get("text", ""), flush=True)
+            if samples is not None:
+                print(samples.get("text", ""), flush=True)
             print(flush=True)
     finished = utc_now()
     run["finished_at"] = rfc3339(finished)
     run["duration_ms"] = int((time.monotonic() - t0) * 1000)
     settings = settings_block(defaults, replicates,
                               max((int(e.get("max_tokens") or defaults.get("max_tokens") or mf.DEFAULT_MAX_TOKENS)
-                                   for e in entries), default=mf.DEFAULT_MAX_TOKENS))
+                                   for e in entries), default=mf.DEFAULT_MAX_TOKENS),
+                              samples=not args.no_samples)
     report = build_report(matrix, results, run, settings)
     with open(args.json_out, "w") as f:
         json.dump(report, f, indent=1)

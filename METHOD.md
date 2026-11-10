@@ -1,15 +1,131 @@
 # Method
 
-Harness version `2026.11.03`. This document is the full method, the
-calibration numbers behind the thresholds, the changes made on 2026-11-03
-and why, and an honest account of what the test can and cannot exclude.
+Harness version `2026.11.10`. This document is the full method, the
+calibration numbers behind the thresholds, the changes made on each
+version and why, and an honest account of what the test can and cannot
+exclude.
 
 ## The question
 
 Is the deployment behind `deeprelay/<model>` serving the published weights,
 at comparable precision, and not a cheaper, quantized or substituted build?
 
-## The idea
+## The judge since 2026.11.10: Model Equality Testing
+
+The verdict is given by a published, peer-reviewed test, Model Equality
+Testing (Irena Gao, Percy Liang, Carlos Guestrin, "Model Equality Testing:
+Which Model Is This API Serving?", ICLR 2025,
+[arXiv:2410.20247](https://arxiv.org/abs/2410.20247)), run through the
+authors' package [`model-equality-testing`](https://github.com/i-gao/model-equality-testing)
+(`pip install model-equality-testing`, version 0.0.2) exactly as
+published. `model_equality.py` collects samples and applies a decision
+rule; every statistic and p-value in the report comes out of the package.
+
+**What is measured.** Every lane answers the same sixteen prompts
+(`SAMPLE_PROMPTS`) at `temperature 1`, `top_p 1`, fifteen times each. The
+package's `CompletionSample` holds a lane's completions as unicode
+codepoints, truncated or padded to L = 200 characters (its README
+setting). For two lanes the statistic is `mmd_hamming`: the maximum mean
+discrepancy with the Hamming kernel (the fraction of positions at which
+two completions agree, restricted to completions of the same prompt).
+The p-value is the package's `permutation_pvalue` with b = 100
+permutations (resolution 0.01). The paper's rejection level is alpha =
+0.05: p < 0.05 means the two lanes are not sampling the same
+distribution.
+
+**Why samples at temperature 1.** The test compares whole output
+distributions, so it needs none of the things the logprob fingerprint
+needs: no `logprobs`, no greedy determinism, no agreement on
+`top_logprobs` width. A vendor whose API offers no log-probabilities
+(Z.ai, Moonshot) is a full reference here, and a thinking-only model is
+compared on the visible answer it samples after thinking.
+
+**Why the band, not the bare p-value.** Two deployments of the same
+weights on different serving stacks do not produce identical
+distributions, and this test is sensitive enough to say so. Measured on
+2026-11-10, GLM 5.3 on Together, Fireworks and Z.ai (240 samples each)
+rejected one another pairwise at p < 0.05 with MMD 0.018 to 0.022, while
+every GLM 5.3 lane sat 0.066 to 0.10 from every GLM 5.3 Flash lane, p =
+0.000 on all nine pairs. The paper reports the same thing for Llama 3
+endpoints (11 of 31 differed from the reference weights). A bare "p >=
+0.05 against a reference" would therefore fail the relay on days it
+reproduces one host's distribution to within that host's distance from
+the vendor's own API. So, exactly as the logprob fingerprint does, the
+distances between the reference deployments define the **band** of "same
+weights, different host", and the controls prove the gap to a different
+model is wide.
+
+**Verdict rule** (`model_equality.judge`), for a subject lane with at
+least two usable reference deployments:
+
+```
+band        = max MMD over every pair of reference deployments
+subject matches reference r  iff  p(subject, r) >= 0.05  or  MMD(subject, r) <= band
+control c separates          iff  MMD(c, r) > band for every reference r
+                                  and MMD(subject, c) > band and p(subject, c) < 0.05
+```
+
+- **same_model**: the subject matches its *nearest* reference (smallest
+  MMD) and MMD(subject, r) < MMD(subject, c) for every reference r and
+  every gating control c (closer to every reference than to any
+  different model).
+- **mismatch**: the subject matches no reference and MMD(subject,
+  nearest reference) >= MMD(subject, nearest gating control): as far
+  from the weights as a different model is.
+- **inconclusive**: anything between; and the whole run is inconclusive
+  when no gating control separates, because the test has not been shown
+  to discriminate on that day's samples. An `advisory` control is
+  reported and noted, never gates.
+- **insufficient**: no subject lane with enough samples, or fewer than two
+  reference deployments. A lane needs 80% of its planned samples and at
+  least five on every prompt, or it is dropped and listed.
+
+Matching the nearest reference, not every reference, is deliberate: the
+band is the maximum over three pairs, so a subject that reproduces one
+host's distribution can sit a little outside the band against another
+host (GLM 5.3 on 2026-11-10: 0.010 and p = 0.21 to Together, 0.014 and p
+= 0.11 to Z.ai, 0.029 and p = 0.00 to Fireworks, band 0.022) while being
+three times closer to every reference than the nearest different model
+(0.069). The control guard is what keeps that lenient: a subject can
+never read `same_model` while sitting as far from a reference as a
+control does.
+
+**Prompt design.** The sixteen prompts are nine continuations of short
+passages written for this harness (English, Spanish, French, German,
+Russian, Chinese), three open writing tasks, two code tasks and two short
+explanations. Two rules came out of the first measurement: never use a
+passage the model has memorised, and tell the model not to repeat the
+passage. A famous article opening (the first version used the Wikipedia
+opening on photosynthesis) made every host recite nearly the same text,
+and a one-word difference in which memorised phrasing a host's sampler
+favoured became an MMD of 1.3 between two deployments of the same
+weights, because the Hamming kernel is position-sensitive. Whether a
+host's chat template makes the model restate the prompt before continuing
+is likewise a template difference, not a weights difference; the
+instruction removes it. With these rules the reference band for the GLM
+models fell from 0.059 to 0.022 (GLM 5.3) and 0.015 (GLM 5.3 Flash) while
+the sibling gap stayed at 0.064 to 0.10.
+
+**What it cannot exclude.** The test compares distributions over the
+first 200 characters of the visible answer. A substitution that leaves
+that distribution unchanged (an identical model behind a different
+label, a quantisation whose sampling distribution matches to within the
+hosts' own spread) is not excluded; neither is anything that only shows
+in long outputs. The Berkeley audit of this problem ("Are You Getting
+What You Pay For?", [arXiv:2504.04715](https://arxiv.org/abs/2504.04715))
+finds text-only tests weaker than logprob analysis against subtle
+substitution, which is why the logprob fingerprint below still runs and
+can veto, and finds that only attested execution can prove serving
+integrity, which no upstream in this matrix offers.
+
+**The logprob fingerprint** that follows is the method this harness
+started with. Since 2026.11.10 it corroborates: it runs on every host that
+returns log-probabilities, its full report and its own verdict
+(`logprobs_verdict`) are published, a logprob `mismatch` vetoes the
+sampling test's pass, and a logprob `inconclusive` or `insufficient`
+changes nothing.
+
+## The idea (the logprob fingerprint)
 
 At temperature 0 the vector of top-k log-probabilities at each output
 position is a tight function of the weights plus the serving precision. Two
@@ -337,6 +453,47 @@ about the weights.
 
 Model-level reasoning is in each run's report; the table above is the
 2026-11-03 calibration and will go stale.
+
+## Changes on 2026-11-10 and why
+
+The sampling test (Model Equality Testing, above) becomes the judge and
+the logprob fingerprint the corroborator. Why: with the logprob
+fingerprint alone, GLM 5.3 and GLM 5.3 Flash read `inconclusive` on every
+daily run (their subject lanes `same_model`, but the sibling control could
+not be told apart on the content-token logprobs: JS 0.030 vs limit 0.046
+and 0.055 vs 0.119), Z.ai could only be a text lane, Kimi K3 could not be
+listed at all, and the method was deeprelay's own. The published test
+needs samples rather than logprobs, which brings every vendor API into
+the band, and it separates the siblings decisively.
+
+Measured before shipping, 2026-11-10, 240 samples per lane (sixteen
+prompts, fifteen each), b = 100, L = 200:
+
+| pair | GLM 5.3 | GLM 5.3 Flash |
+|---|---|---|
+| relay vs Together (MMD, p) | 0.010, 0.21 | 0.0045, 0.29 |
+| relay vs Fireworks | 0.029, 0.00 | 0.0031, 0.31 |
+| relay vs Z.ai | 0.014, 0.11 | 0.0035, 0.27 |
+| band (max reference pair) | 0.022 | 0.015 |
+| relay vs sibling on Fireworks | 0.088, 0.00 | 0.064, 0.00 |
+| relay vs sibling on Together | 0.069, 0.00 | 0.070, 0.00 |
+| relay vs sibling on Z.ai | 0.070, 0.00 | 0.089, 0.00 |
+| sibling vs nearest reference | 0.066 | 0.066 |
+
+Both read `same_model` with all three sibling controls separating. The
+first version of the prompt set, with a memorised Wikipedia opening and
+no instruction against restating the passage, gave bands of 0.059 and
+0.059 and sibling gaps of 0.091 and 0.094 (see "Prompt design"); the
+shipped prompts are the second version.
+
+Also in this version: `requirements.txt` and the package install in both
+workflows (CI on Python 3.11 to 3.13, since torch 2.15 needs 3.11); the
+matrix gains `defaults.samples` and a per-model `samples` block (GLM 5.3
+and GLM 5.3 Flash sample at `reasoning_effort: low`, since their thinking
+cannot be disabled and would otherwise exhaust the token budget); a lane
+marked `stream: true` is sampled over SSE too; `run_matrix.py --no-samples`
+runs the logprob fingerprint alone; a text lane the sampling test judged
+is a wire `reference`.
 
 ## Changes on 2026-11-06 and why
 
